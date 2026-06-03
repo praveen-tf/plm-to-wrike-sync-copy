@@ -1,0 +1,29 @@
+# Secrets
+.yaml
+*.secrets.yaml
+local.settings.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.python_packages/
+
+# Azure Functions build artifacts
+bin/
+obj/
+.azurefunctions/
+
+# Test / build cache
+.pytest_cache/
+*.bak
+
+# OS / editor junk
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
+
+# Internal docs (not shared with the client repo)
+docs/

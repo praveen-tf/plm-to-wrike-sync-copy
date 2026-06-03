@@ -1,0 +1,22 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+
+    "ServiceBusConnection": "<SB namespace connection string with Listen rights (consumer)>",
+    "ServiceBusSendConnection": "<SB namespace connection string with Send rights (producer)>",
+    "ServiceBusQueue": "plm-sync",
+
+    "PG_CONN": "<host=... port=5432 dbname=plm user=plm password=...> (or PG_HOST/PG_PORT/...)",
+
+    "WRIKE_TOKEN_PRAVEEN": "<Wrike permanent access token - BAKING/HOT DRINKS author>",
+    "WRIKE_TOKEN_JESSE": "<Wrike permanent access token - CONFECTION author>",
+    "WRIKE_HOST": "www.wrike.com",
+    "WRIKE_FOLDER_WP": "<WP folder id - numeric permalink id or alphanumeric API id>",
+    "WRIKE_FOLDER_LT": "<LT folder id - numeric permalink id or alphanumeric API id>",
+    "WRIKE_RETAIL_ITEM_TYPE_ID": "<Custom Item Type id for 'Retail Item' (GET /custom_item_types)>",
+
+    "APPLICATIONINSIGHTS_CONNECTION_STRING": "<from App Insights resource>"
+  }
+}

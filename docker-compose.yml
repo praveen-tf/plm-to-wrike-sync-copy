@@ -1,0 +1,28 @@
+# Local Postgres for the PLM->Wrike sync POC.
+# Data persists in the named volume `plm_pgdata` across `down`/restart/reboot.
+# Wipe with: docker compose down -v
+#
+# Host port is 5433 (not 5432) to avoid clashing with any Postgres already on this machine.
+services:
+  postgres:
+    image: postgres:16
+    container_name: plm_wrike_pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: plm
+      POSTGRES_PASSWORD: plm_local_pw
+      POSTGRES_DB: plm
+    ports:
+      - "5433:5432"
+    volumes:
+      - plm_pgdata:/var/lib/postgresql/data
+      # schema.sql runs automatically on first init (empty volume only)
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U plm -d plm"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  plm_pgdata:
