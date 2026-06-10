@@ -29,7 +29,7 @@ from db import connect
 from plm_reader import read_one_family, sorted_eligible_families
 from settings import load_local_settings
 from state import EPOCH, get_watermark, set_watermark
-from sync import load_sync_context, sync_one_family
+from sync import load_sync_context, reconcile_folders, sync_one_family
 from wrike_client import make_wrike_client
 
 app = func.FunctionApp()
@@ -76,6 +76,21 @@ def plm_wrike_producer(timer: func.TimerRequest) -> None:
                       rows_in_delta=len(families), rows_succeeded=len(families),
                       rows_failed=0)
     logging.info("PLM->Wrike producer: enqueued %d families onto %s", len(families), QUEUE)
+
+
+@app.route(route="reconcile", auth_level=func.AuthLevel.FUNCTION)
+def plm_wrike_reconcile(req: func.HttpRequest) -> func.HttpResponse:
+    """Full-folder reconciliation, run on demand (one-time bootstrap or periodic
+    audit) - separate from the per-message sync. Walks every card in each managed
+    folder and review-logs the ones that don't map to a PLM record by
+    (item_number + raw customer) into wrike_unmapped_log, hand-made cards included.
+    Read-only against Wrike. The log is exported to Excel for the client's
+    data-quality review."""
+    load_local_settings()
+    with connect() as conn:
+        summary = reconcile_folders(conn, make_wrike_client, load_sync_context(conn))
+    logging.info("PLM->Wrike reconcile: %s", summary)
+    return func.HttpResponse(json.dumps(summary), mimetype="application/json")
 
 
 @app.service_bus_queue_trigger(arg_name="msg", queue_name="plm-sync",

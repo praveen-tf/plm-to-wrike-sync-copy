@@ -75,25 +75,42 @@ class WrikeClient:
         self._folder_cache[folder_id] = ids[0]["id"]
         return self._folder_cache[folder_id]
 
-    def find_task_by_title_prefix(self, prefix: str, folder_ids) -> str | None:
-        """Find a task whose title starts with `prefix` (the family id), searching ONLY
-        within `folder_ids` and their subfolders — never account-wide. Returns None when
-        no folders are given (nothing in scope), so the caller creates a new card."""
-        ids = sorted({self.resolve_folder_id(f) for f in folder_ids})
-        if not ids:
-            return None
-        # Query each folder separately and union: Wrike rejects the multi-id form
-        # (GET /folders/A,B/tasks -> 400 Invalid Folder ID) for permalink-resolved
-        # WsFolder ids, even when each id is valid on its own.
-        for fid in ids:
-            data = self._request(
-                "GET", f"/folders/{fid}/tasks",
-                params={"title": prefix, "descendants": "true"},
-            )
-            for task in data.get("data", []):
-                if task.get("title", "").startswith(prefix):
-                    return task["id"]
-        return None
+    def find_tasks_by_custom_field(self, field_id: str, value: str,
+                                   folder_id: str) -> list[dict]:
+        """ALL tasks in `folder_id` (and its subfolders) whose custom field `field_id`
+        equals `value` exactly — never account-wide. Returns full task dicts
+        (customFields included) so the caller can inspect the other fields and decide
+        what to do with each match (see project_docs/wrike_api.md)."""
+        fid = self.resolve_folder_id(folder_id)
+        data = self._request(
+            "GET", f"/folders/{fid}/tasks",
+            params={
+                "customFields": json.dumps([{"id": field_id, "value": value}]),
+                "descendants": "true",
+                "fields": json.dumps(["customFields", "parentIds"]),
+            },
+        )
+        return data.get("data", [])
+
+    def list_folder_tasks(self, folder_id: str) -> list[dict]:
+        """Every task in `folder_id` and its subfolders, customFields included —
+        the reconciliation walk. Paginated (pageSize max is 1000)."""
+        fid = self.resolve_folder_id(folder_id)
+        tasks: list[dict] = []
+        page_token = None
+        while True:
+            params = {
+                "descendants": "true",
+                "pageSize": 1000,
+                "fields": json.dumps(["customFields", "parentIds"]),
+            }
+            if page_token:
+                params["nextPageToken"] = page_token
+            data = self._request("GET", f"/folders/{fid}/tasks", params=params)
+            tasks.extend(data.get("data", []))
+            page_token = data.get("nextPageToken")
+            if not page_token:
+                return tasks
 
     def create_task(self, folder_id: str, payload: dict) -> dict:
         folder = self.resolve_folder_id(folder_id)

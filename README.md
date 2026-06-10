@@ -1,17 +1,21 @@
 # PLM to Wrike Sync
 
 One-way synchronisation of product data from a PLM source database into Wrike work items.
-The pipeline runs as two Azure Functions decoupled by an Azure Service Bus queue, so each
-record is processed and retried independently and a single bad record never stops the batch.
+The pipeline runs as three Azure Functions (two core sync functions plus a reconciliation function)
+decoupled by an Azure Service Bus queue, so each record is processed and retried independently
+and a single bad record never stops the batch.
 
 ## What it does
 
 - Reads product records that changed since the last run from a PostgreSQL source table.
 - Selects one canonical record per product family (CORE preferred over CUSTOM).
-- Creates a Wrike card for a new family, or updates the existing card for a known family.
+- Creates a Wrike card for a new family, or updates the existing card for a known family via a
+  1:1 live map (PLM record ↔ Wrike card keyed by id).
 - On update, writes only the fields that actually changed, merges the PLM-owned description
   sections, comments on tracked content changes, and raises a comment-only alert on fields
   that must not be auto-overwritten.
+- Routes unmapped or ambiguous cards to a human-reviewed log table, exported to Excel for
+  data-quality review.
 - Records the outcome of every record in a sync-state table and routes repeated failures to
   a dead-letter queue.
 
@@ -26,14 +30,15 @@ PostgreSQL (source)
    -> Service Bus queue (plm-sync)     decouples and buffers, with a dead-letter queue
    -> Consumer Function (queue trigger) transforms and writes to Wrike, records sync state
    -> Wrike API                        creates or updates the card
-   -> PostgreSQL (sync state)          family to card map, watermark, dead-letter
+   -> PostgreSQL (sync state)          family to card map, watermark, dead-letter, unmapped log
+   -> Reconciliation Function (HTTP)   on-demand full-folder audit of unmapped cards
 ```
 
 | Azure resource | Role |
 |---|---|
-| Function App (Python) | Hosts both functions, the producer and the consumer |
-| Service Bus namespace and queue | Decoupling, retry, and dead-lettering between the two functions |
-| PostgreSQL | Source records and sync state |
+| Function App (Python) | Hosts three functions: producer (timer), consumer (queue trigger), reconciliation (HTTP) |
+| Service Bus namespace and queue | Decoupling, retry, and dead-lettering between producer and consumer |
+| PostgreSQL | Source records, sync state, live map, folder routing, and unmapped-card log |
 | Key Vault | Wrike tokens, database connection string, Service Bus connection string |
 | Application Insights | Execution logs, failures, and queue metrics |
 
@@ -60,13 +65,25 @@ Triggers once per message. For each message it:
 
 1. Re-reads the canonical family by identifier. If the family is no longer eligible, the
    message is acknowledged and skipped.
-2. Decides create or update by looking up the family to card map, falling back to a scoped
-   title search inside the configured folders.
-3. Builds the Wrike payload and writes the card.
-4. Records the result in the sync-state table.
+2. Decides create or update using a three-step resolution:
+   - If the family has a live map row, update that card directly by id (no Wrike search).
+   - Otherwise, search Wrike by the "PLM - Item #" custom field within the prefix's mapped folder.
+   - Branch based on the search result: nothing → create; one exact match → update; extras or
+     non-exact → log to the review table.
+3. Builds the Wrike payload and writes the card (if the branch is create or update).
+4. Records the result in the sync-state table and the unmapped-log table (if applicable).
 
 An unhandled error abandons the message lock, so Service Bus redelivers it and, after the
 maximum delivery count, moves it to the dead-letter queue.
+
+### Reconciliation (HTTP trigger, on demand)
+
+The `plm_wrike_reconcile` function (route `/api/reconcile`, auth level FUNCTION) performs a
+full-folder audit: it walks every card in each managed folder (including the staging folder)
+and attempts to match each card to a PLM record by item number + raw customer string. Cards
+that do not match—including hand-made cards—are logged to the unmapped-log table for the
+client's data-quality review. The function is read-only against Wrike and run on demand
+(e.g., after a cold-start or to audit the folder state).
 
 ## Field mapping and sync rules
 
@@ -82,11 +99,14 @@ maximum delivery count, moves it to the dead-letter queue.
   is posted instead.
 - Every new card is stamped with the Wrike Item Type "Retail Item".
 - A card with no real change is left untouched.
+- Customer matching is raw and exact (no normalization)—deliberately surfaces data-quality
+  issues so they land in the Excel export for client review.
 
 The Wrike author of a card is the owner of the API token that created it. Tokens are mapped to
-product categories in the `category_author_map` table. Cards are placed in the existing folder
-whose configured prefix matches the item, and a family with no matching folder is deferred to
-the next run rather than misfiled.
+product categories in the `category_author_map` table. Cards are placed in the folder identified
+by the `wrike_folder_map` table (prefix → folder id), and a family with an unmapped prefix is
+created in the staging folder (a special `'*'` row in `wrike_folder_map`) and the missed prefix
+is logged.
 
 ## Data model
 
@@ -97,7 +117,9 @@ The schema is defined in `db/schema.sql`.
 | `plm_item` | Source records, one row per PLM variant |
 | `category_author_map` | Product category to author token mapping |
 | `sync_watermark` | Incremental cursor and last-run statistics |
-| `wrike_task_map` | Family to Wrike card map, last-synced snapshot, and per-record sync status |
+| `wrike_task_map` | 1:1 live map (PLM record ↔ Wrike card); keys: `plm_internal_id` (PK) ↔ `wrike_task_id` (UNIQUE); columns `item_number`, `family_id`, `customer` for audit/recovery |
+| `wrike_folder_map` | Item prefix to folder routing table (human-maintained, sole authority); keys: `prefix` (PK), columns `wrike_folder_id`, `full_folder_name`, `space_id`, timestamps |
+| `wrike_unmapped_log` | Review log for unmapped, ambiguous, or hand-made cards; columns: `item_number`, `customer`, `wrike_task_id`, `prefix`, `reason` (e.g., `no_exact_match`, `multiple_exact_matches`, `non_identical_extra`, `unmapped_prefix`, `no_plm_match`), `details`, `created_at` |
 | `sync_dlq` | Records that failed after retries |
 
 ## Configuration
@@ -114,13 +136,14 @@ configuration itself.
 | `ServiceBusQueue` | Queue name, default `plm-sync` | Plain value |
 | `WRIKE_TOKEN_<NAME>` | Wrike API token per author identity | Key Vault reference |
 | `WRIKE_HOST` | Wrike API host, default `www.wrike.com` | Plain value |
-| `WRIKE_FOLDER_<PREFIX>` | Target folder id for an item prefix | Plain value |
 | `WRIKE_RETAIL_ITEM_TYPE_ID` | Custom Item Type id for new cards | Plain value |
 | `APPLICATIONINSIGHTS_CONNECTION_STRING` | Telemetry | Plain value |
 
 The `WRIKE_TOKEN_<NAME>` setting names must match the `token_ref` values in
-`category_author_map`. The `WRIKE_FOLDER_<PREFIX>` names map an item prefix (for example WP)
-to a Wrike folder. A numeric folder id from a folder URL is accepted and resolved automatically.
+`category_author_map`. Folder routing is read from the `wrike_folder_map` table; the app
+never searches Wrike for folders by name. A special `'*'` row in `wrike_folder_map` serves as
+a fallback staging folder for unmapped prefixes. If no `'*'` row is present, items with
+unmapped prefixes defer (safe degradation).
 
 ## Deployment using the Azure portal
 
@@ -149,11 +172,17 @@ to a Wrike folder. A numeric folder id from a folder URL is accepted and resolve
 
 8. Deploy the code. Publish this project to the Function App using the Azure Functions
    extension for Visual Studio Code, the Azure Functions Core Tools, or the portal Deployment
-   Center. After deployment both functions appear under Functions, named `plm_wrike_producer`
-   and `plm_wrike_consumer`.
+   Center. After deployment, three functions appear under Functions: `plm_wrike_producer`
+   (timer), `plm_wrike_consumer` (queue trigger), and `plm_wrike_reconcile` (HTTP).
 
-9. Verify. On the Function App, confirm the host is running and both functions are listed.
-   On Configuration, confirm every Key Vault reference shows a resolved status.
+9. Folder mapping. Populate the `wrike_folder_map` table with the item prefixes and their
+   target folder ids (e.g., WP → 4459532498, LT → 4469574468). New prefixes are added by
+   humans after client/business approval, not by the app.
+
+10. Verify. On the Function App, confirm the host is running and all three functions are listed.
+    On Configuration, confirm every Key Vault reference shows a resolved status. Test the
+    producer and consumer by running the producer manually (via Code and Test or admin endpoint)
+    and checking the queue depth and logs.
 
 ## Operations
 
@@ -162,12 +191,20 @@ to a Wrike folder. A numeric folder id from a folder URL is accepted and resolve
   call the function admin endpoint with the host key. `scripts/trigger_azure.sh` wraps the
   command-line equivalents for triggering, checking queue depth, and tailing logs.
 
+- Reconciliation audit. To audit the managed folders for unmapped or hand-made cards,
+  call the `plm_wrike_reconcile` HTTP function (route `/api/reconcile`). The function is
+  read-only and logs every unmapped card to the review table for export.
+
 - Monitor. Use Application Insights for execution logs and failures. Use the Service Bus
   metrics for active and dead-lettered message counts.
 
 - Failures. A record that fails all retries lands in the queue dead-letter sub-queue and is
   recorded in `sync_dlq`. Configure an alert on a dead-letter count greater than zero so a
   record that never reached Wrike is noticed.
+
+- Data-quality review. Export the `wrike_unmapped_log` table to Excel to review unmapped,
+  ambiguous, and hand-made cards. The table includes the item number, customer, Wrike task id,
+  prefix, reason code, and details for each unmapped card.
 
 ## Local development
 
@@ -181,4 +218,3 @@ python -m pytest            # unit and database-backed tests
 
 The application reads the same settings locally from `local.settings.json`, which is excluded
 from version control. Use `local.settings.json.example` as a template.
-```

@@ -1,7 +1,10 @@
+from conftest import seed_folder_map
+from fixtures_mapping import HTML_CORE
 from mapping import (
     CUSTOM_FIELDS,
     build_create_payload,
     build_update_payload,
+    customer_matches,
     load_category_author_map,
     load_folder_map,
     resolve_author,
@@ -74,7 +77,7 @@ def test_update_payload_omits_create_only_and_top_level_fields():
     assert "title" not in p
     assert "status" not in p
     assert "importance" not in p
-    assert "description" not in p  # description handled by section-merge in Phase 3
+    assert "description" not in p  # description is section-merged separately, never PUT wholesale
 
 
 def test_update_payload_custom_fields_are_update_eligible_only():
@@ -85,7 +88,7 @@ def test_update_payload_custom_fields_are_update_eligible_only():
     assert cf[_fid("season")] == "2026 FALL/HOLIDAY"
 
 
-FOLDERS = {"WP": "fold_wp", "*": "fold_fallback"}
+FOLDERS = {"WP": "fold_wp"}
 AUTHORS = {
     "BAKING": ("Praveen", "WRIKE_TOKEN_PRAVEEN"),
     "CONFECTION": ("Jesse", "WRIKE_TOKEN_JESSE"),
@@ -93,15 +96,15 @@ AUTHORS = {
 
 
 def test_resolve_folder_known_prefix():
-    assert resolve_folder("WP", FOLDERS) == ("fold_wp", False)
+    assert resolve_folder("WP", {**FOLDERS, "*": "fold_staging"}) == ("fold_wp", False)
 
 
-def test_resolve_folder_unknown_prefix_uses_fallback_and_flags():
-    assert resolve_folder("ZZ", FOLDERS) == ("fold_fallback", True)
+def test_resolve_folder_unknown_prefix_routes_to_staging_row():
+    assert resolve_folder("ZZ", {**FOLDERS, "*": "fold_staging"}) == ("fold_staging", True)
 
 
-def test_resolve_folder_unknown_prefix_without_fallback_is_none():
-    assert resolve_folder("ZZ", {"WP": "fold_wp"}) == (None, True)
+def test_resolve_folder_unknown_prefix_without_staging_row_is_none():
+    assert resolve_folder("ZZ", FOLDERS) == (None, True)
 
 
 def test_resolve_author_maps_category_to_identity():
@@ -109,20 +112,27 @@ def test_resolve_author_maps_category_to_identity():
     assert resolve_author("CONFECTION", AUTHORS) == ("Jesse", "WRIKE_TOKEN_JESSE")
 
 
-def test_load_folder_map_reads_prefix_env_vars(monkeypatch):
-    monkeypatch.setenv("WRIKE_FOLDER_WP", "4459532498")  # numeric permalink id is fine
-    monkeypatch.setenv("WRIKE_FOLDER_LT", "fold_lt")
-    fmap = load_folder_map()
-    assert fmap["WP"] == "4459532498"
-    assert fmap["LT"] == "fold_lt"
+def test_load_folder_map_reads_the_db_table(pg_conn):
+    seed_folder_map(pg_conn, {"WP": "4459532498", "LT": "fold_lt"})
+    assert load_folder_map(pg_conn) == {"WP": "4459532498", "LT": "fold_lt"}
 
 
-def test_load_folder_map_uppercases_keys_and_skips_blanks(monkeypatch):
-    monkeypatch.setenv("WRIKE_FOLDER_aw", "fold_aw")  # lower-case suffix -> upper key
-    monkeypatch.setenv("WRIKE_FOLDER_ZZ", "   ")       # blank -> not a mapping
-    fmap = load_folder_map()
-    assert fmap["AW"] == "fold_aw"
-    assert "ZZ" not in fmap
+def test_load_folder_map_empty_table_is_empty_map(pg_conn):
+    assert load_folder_map(pg_conn) == {}
+
+
+def test_customer_match_is_raw_exact():
+    assert customer_matches("*CORE", "*CORE")
+    assert customer_matches(None, "")          # Wrike stores every value as a string
+    assert not customer_matches("*CORE", "*core")        # case-sensitive
+    assert not customer_matches("*CORE", " *CORE")       # no trimming
+    assert not customer_matches("*CORE", "*CORETJXCOMPANIES, HOMEGOODS")
+
+
+def test_customer_match_fails_on_html_polluted_value():
+    # Real MGF data quality: an HTML anchor pasted into the Customer field must
+    # FAIL the raw match (and land in the review log), never silently match.
+    assert not customer_matches("*CORE", HTML_CORE)
 
 
 def test_author_map_loads_from_db(pg_conn):

@@ -1,0 +1,40 @@
+# Pre-commit hooks - run before each commit
+# Install: uv run prek install
+# Run manually: uv run prek run --all-files
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.4
+    hooks:
+      # Ruff linter
+      - id: ruff
+        args: [--fix]
+        exclude: '^sandbox/.*\.ipynb$'
+      # Ruff formatter
+      - id: ruff-format
+        exclude: '^sandbox/.*\.ipynb$'
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        types: [file]  # Run on any file
+        files: '\.(yaml|yml)(\..+)?$'  # Match .yaml, .yml, .yaml.example, .yml.example
+      - id: check-added-large-files
+      - id: check-merge-conflict        # Prevents committing merge conflict markers
+      - id: debug-statements            # Catches leftover pdb, breakpoint() calls
+      - id: detect-private-key          # Prevents committing .pem, .key files
+        exclude: '(README\.md$)'  # Skip READMEs
+
+  # Pre-push hooks - run before each push (heavier checks)
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy type checker
+        entry: uv run mypy . --explicit-package-bases
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [pre-push]

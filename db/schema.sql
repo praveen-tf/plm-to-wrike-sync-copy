@@ -42,9 +42,31 @@ CREATE TABLE IF NOT EXISTS plm_item (
 CREATE INDEX IF NOT EXISTS ix_plm_item_modified_at ON plm_item (modified_at);
 CREATE INDEX IF NOT EXISTS ix_plm_item_family_id   ON plm_item (family_id);
 
--- Item-prefix -> Wrike folder routing is configured in app settings
--- (WRIKE_FOLDER_<PREFIX>, e.g. WRIKE_FOLDER_WP / WRIKE_FOLDER_AW), not in the DB,
--- because folder ids are environment-specific. See mapping.load_prefix_folder_map.
+-- ---------------------------------------------------------------------------
+-- Config: item-prefix -> Wrike folder routing.
+-- ALL folder ids live here - no folder id is environment config. Human-maintained
+-- and the SOLE authority: the app never discovers folders by searching Wrike. New
+-- rows are added manually after client/business approval.
+-- The special row prefix = '*' is the staging/pending fallback: an item whose
+-- prefix has no row is created in that folder and the miss is logged to
+-- wrike_unmapped_log for follow-up. With no '*' row either, the item defers.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS wrike_folder_map (
+    prefix            text PRIMARY KEY,           -- e.g. WP, LT; '*' = staging fallback
+    wrike_folder_id   text NOT NULL,              -- numeric permalink id or v4 API id
+    full_folder_name  text,
+    space_id          text,                       -- the Wrike space the folder lives in
+    created_at        timestamptz NOT NULL DEFAULT now(),
+    updated_at        timestamptz NOT NULL DEFAULT now()
+);
+
+-- POC seed: the test folders in the Personal space. Folder ids are environment-
+-- specific; humans update these rows when the sync points at the client's MGF space.
+INSERT INTO wrike_folder_map (prefix, wrike_folder_id, full_folder_name, space_id) VALUES
+    ('WP', '4459532498', 'WP - Winnie-the-Pooh', '4450208096'),
+    ('LT', '4469574468', 'LT - Lindt',           '4450208096'),
+    ('*',  '4483642519', 'Pending (staging)',    '4450208096')
+ON CONFLICT (prefix) DO NOTHING;
 
 -- ---------------------------------------------------------------------------
 -- Config: product-category -> author identity (Wrike Author = token owner).
@@ -77,12 +99,17 @@ CREATE TABLE IF NOT EXISTS sync_watermark (
 );
 
 -- ---------------------------------------------------------------------------
--- State: PLM family -> Wrike task map + last-synced snapshot for change detection.
+-- State: the 1:1 live map - one canonical PLM record <-> one Wrike card - plus the
+-- last-synced snapshot for change detection. Both ids are unique: a PLM record can
+-- never map to two cards, and two PLM records can never share one card. item_number,
+-- customer and family_id are descriptive (verification / recovery / audit), NOT keys.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS wrike_task_map (
-    family_id            text PRIMARY KEY,
-    plm_internal_id      text,
-    wrike_task_id        text,
+    plm_internal_id      text PRIMARY KEY,        -- canonical PLM record (stable PLM key)
+    wrike_task_id        text NOT NULL,           -- that record's one Wrike card (unique index below)
+    family_id            text,                    -- first 8 chars of the item number
+    item_number          text,                    -- also on the card ("PLM - Item #")
+    customer             text,                    -- canonical's customer at last sync
     wrike_permalink      text,
     snap_material_codes  text,
     snap_contents        text,
@@ -90,20 +117,64 @@ CREATE TABLE IF NOT EXISTS wrike_task_map (
     snap_brand_category  text,
     created_at           timestamptz,
     last_synced_at       timestamptz,
-    -- Stage 5 per-record sync outcome (queryable status, set by record_sync_result):
-    sync_status          text,                    -- created | updated | unchanged | deferred | failed
+    -- Per-record sync outcome (queryable status, set by record_sync_result):
+    sync_status          text,                    -- created | updated | unchanged | logged | deferred | failed
     retry_count          int DEFAULT 0,           -- also available live as msg.delivery_count
     error_message        text,
     updated_at           timestamptz              -- last sync attempt (created_at = first)
 );
 
--- For DBs created before the Stage 5 columns existed (the docker volume persists across
+-- For DBs created before the outcome columns existed (the docker volume persists across
 -- restarts, so CREATE TABLE IF NOT EXISTS won't add them) - idempotent backfill:
 ALTER TABLE wrike_task_map
     ADD COLUMN IF NOT EXISTS sync_status   text,
     ADD COLUMN IF NOT EXISTS retry_count   int DEFAULT 0,
     ADD COLUMN IF NOT EXISTS error_message text,
     ADD COLUMN IF NOT EXISTS updated_at    timestamptz;
+
+-- Migration for DBs created when family_id was the primary key. Idempotent: the DO
+-- block only fires while that primary key is still in place. Fails loudly if
+-- existing rows have NULL/duplicate plm_internal_id - those need a human, not a guess.
+ALTER TABLE wrike_task_map
+    ADD COLUMN IF NOT EXISTS item_number text,
+    ADD COLUMN IF NOT EXISTS customer    text;
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_index i
+        JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY (i.indkey)
+        WHERE i.indrelid = 'wrike_task_map'::regclass
+          AND i.indisprimary AND a.attname = 'family_id'
+    ) THEN
+        ALTER TABLE wrike_task_map DROP CONSTRAINT wrike_task_map_pkey;
+        ALTER TABLE wrike_task_map ALTER COLUMN plm_internal_id SET NOT NULL;
+        ALTER TABLE wrike_task_map ADD PRIMARY KEY (plm_internal_id);
+        ALTER TABLE wrike_task_map ALTER COLUMN wrike_task_id SET NOT NULL;
+    END IF;
+END $$;
+-- family_id is descriptive; migrated DBs carry a leftover NOT NULL from the old key.
+ALTER TABLE wrike_task_map ALTER COLUMN family_id DROP NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS wrike_task_map_wrike_task_id_key
+    ON wrike_task_map (wrike_task_id);
+CREATE INDEX IF NOT EXISTS ix_wrike_task_map_family_id ON wrike_task_map (family_id);
+
+-- ---------------------------------------------------------------------------
+-- Review/log: Wrike cards that do not cleanly map to a PLM record (ambiguous or
+-- non-identical search results, unmapped prefixes, reconciliation misses - incl.
+-- hand-made cards). Append-only; exported to Excel for the client's data-quality
+-- review. Rows are resolved by humans, never auto-remediated.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS wrike_unmapped_log (
+    id              bigserial PRIMARY KEY,
+    item_number     text,
+    customer        text,                         -- the card's raw Customer value
+    wrike_task_id   text,
+    prefix          text,
+    reason          text NOT NULL,                -- no_exact_match | multiple_exact_matches |
+                                                  -- non_identical_extra | unmapped_prefix | no_plm_match
+    details         text,
+    created_at      timestamptz NOT NULL DEFAULT now()
+);
 
 -- ---------------------------------------------------------------------------
 -- State: dead-letter for rows that failed after retries.

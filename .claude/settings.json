@@ -1,0 +1,11 @@
+{"permissions": {
+    "allow": [
+"mcp__deep-wiki__*",
+      "mcp__claude_ai_Atlassian__*",
+      "mcp__claude_ai_Context7__*",
+      "mcp__claude_ai_Excalidraw__*"
+    ]
+  },
+  "enableAllProjectMcpServers": true,
+  "plansDirectory": "./specs"
+}

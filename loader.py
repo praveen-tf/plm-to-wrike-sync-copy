@@ -92,14 +92,19 @@ def load_plm_items(conn, items: list[dict]) -> None:
     conn.commit()
 
 
+def item_prefix(item_number: str) -> str:
+    """Leading alpha prefix of an item number, e.g. 'WP-71511-006-319' -> 'WP'."""
+    match = re.match(r"^[A-Za-z]+", item_number)
+    return match.group(0) if match else ""
+
+
 def to_plm_item(row: dict, *, now) -> dict:
     item = {field: row.get(col) for col, field in COLUMN_MAP.items()}
 
     item_number = item["item_number"]
-    prefix_match = re.match(r"^[A-Za-z]+", item_number)
     parts = item_number.split("-")
     item["family_id"] = item_number[:8]
-    item["prefix"] = prefix_match.group(0) if prefix_match else ""
+    item["prefix"] = item_prefix(item_number)
     item["code"] = parts[1] if len(parts) > 1 else ""
 
     # synthesized control columns (absent from the source Excel):

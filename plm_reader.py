@@ -47,6 +47,15 @@ def read_one_family(conn, family_id) -> dict | None:
     return pick_canonical(rows) if rows else None
 
 
+def read_item_customer_pairs(conn) -> list[tuple]:
+    """Every (item_number, customer) pair in the source - the reconciliation walk
+    matches Wrike cards against these. Deliberately ungated: a card whose record is
+    not ready_for_wrike still maps to PLM (it just isn't synced)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT item_number, customer FROM plm_item")
+        return cur.fetchall()
+
+
 def pick_canonical(rows: list[dict]) -> dict:
     """Pick the one record that drives the Wrike card from a family's variants.
 
