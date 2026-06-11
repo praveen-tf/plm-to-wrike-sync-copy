@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from loader import load_plm_items, read_source_rows, to_plm_item
-from plm_reader import pick_canonical, read_changed_items, resolve_eligible_families
+from plm_reader import pick_canonical, read_changed_items, read_one_item, resolve_eligible_items
 
 DATA = Path(__file__).resolve().parent.parent / "data" / "input"
 T0 = datetime(2026, 6, 2, 12, 0, 0, tzinfo=timezone.utc)
@@ -74,24 +74,54 @@ def test_read_changed_items_excludes_not_ready(pg_conn):
     assert all(i["ready_for_wrike"] for i in items)
 
 
-def test_resolve_eligible_families_one_per_family(pg_conn):
+def test_resolve_eligible_items_one_per_item_number(pg_conn):
     _load_all(pg_conn, now=T0)
-    fams = resolve_eligible_families(pg_conn, since=T0 - timedelta(minutes=1))
-    assert len(fams) == 11
-    assert len({f["family_id"] for f in fams}) == 11
+    items = resolve_eligible_items(pg_conn, since=T0 - timedelta(minutes=1))
+    assert len(items) == 11
+    assert len({i["item_number"] for i in items}) == 11
 
 
-def test_resolve_dedups_variants_to_canonical(pg_conn):
+def test_resolve_dedups_same_item_number_customers_to_canonical(pg_conn):
     _load_all(pg_conn, now=T0)
-    # add a *CUSTOM sibling under the same family as WP-71511; canonical must stay *CORE
+    # a *CUSTOM row for the SAME item number as WP-71511-006-319 (already *CORE) must
+    # collapse to the *CORE canonical - still one record for that item number.
     with pg_conn.cursor() as cur:
         cur.execute(
             "INSERT INTO plm_item (plm_internal_id, item_number, family_id, prefix, code, "
             "customer, product_category, ready_for_wrike, created_at, modified_at) VALUES "
-            "('1b','WP-71511-007-319','WP-71511','WP','71511','*CUSTOM','BAKING',true,%s,%s)",
+            "('1b','WP-71511-006-319','WP-71511','WP','71511','*CUSTOM','BAKING',true,%s,%s)",
             (T0, T0),
         )
-    fams = resolve_eligible_families(pg_conn, since=T0 - timedelta(minutes=1))
-    assert len(fams) == 11  # still one record per family
-    wp = next(f for f in fams if f["family_id"] == "WP-71511")
+    items = resolve_eligible_items(pg_conn, since=T0 - timedelta(minutes=1))
+    assert len(items) == 11  # the *CUSTOM row collapsed into the existing item number
+    wp = next(i for i in items if i["item_number"] == "WP-71511-006-319")
     assert wp["customer"] == "*CORE"
+
+
+def test_distinct_item_numbers_in_one_family_are_separate_items(pg_conn):
+    _load_all(pg_conn, now=T0)
+    # a DIFFERENT item number in the same 8-char family is now its own card, not collapsed -
+    # the canonical unit is the item number, not the family.
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO plm_item (plm_internal_id, item_number, family_id, prefix, code, "
+            "customer, product_category, ready_for_wrike, created_at, modified_at) VALUES "
+            "('1c','WP-71511-007-319','WP-71511','WP','71511','*CORE','BAKING',true,%s,%s)",
+            (T0, T0),
+        )
+    items = resolve_eligible_items(pg_conn, since=T0 - timedelta(minutes=1))
+    assert len(items) == 12  # the new item number is a separate item
+    assert {"WP-71511-006-319", "WP-71511-007-319"} <= {i["item_number"] for i in items}
+
+
+def test_read_one_item_returns_canonical(pg_conn):
+    _load_all(pg_conn, now=T0)
+    with pg_conn.cursor() as cur:  # a *CUSTOM row for the same item number
+        cur.execute(
+            "INSERT INTO plm_item (plm_internal_id, item_number, family_id, prefix, code, "
+            "customer, product_category, ready_for_wrike, created_at, modified_at) VALUES "
+            "('1b','WP-71511-006-319','WP-71511','WP','71511','*CUSTOM','BAKING',true,%s,%s)",
+            (T0, T0),
+        )
+    assert read_one_item(pg_conn, "WP-71511-006-319")["customer"] == "*CORE"  # canonical
+    assert read_one_item(pg_conn, "NOPE-000-000") is None

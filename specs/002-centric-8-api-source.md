@@ -128,7 +128,8 @@ from 001 reads that mirror exactly as before — none of it changes.
   additions are trust-JSON-body-over-500 and retry-on-timeout. No new dependency.
 - **`customer` ← resolved `category_2`.** Centric's "Collection" reference holds the
   `*CORE`/`*CUSTOM` value, so `pick_canonical` (CORE-over-CUSTOM, latest-updated) is still
-  meaningful when variants share a `family_id`.
+  meaningful when an item number carries several customer rows (the canonical unit is the
+  item number — see 001's 2026-06-11 note).
 - **Timestamps.** Centric exposes only `_modified_at` — no creation date (confirmed against
   the spec + a live record). `modified_at` ← `_modified_at` (the watermark); `created_at` ←
   the same `_modified_at` (a real timestamp, not a dummy), since it only feeds

@@ -3,14 +3,14 @@
 Two functions share one codebase (see README.md):
 
 * plm_wrike_producer  - timer. Refreshes the local plm_item mirror from the Centric 8 API
-  (the delta since the watermark; the first run backfills the full active catalogue), then
-  reads the changed/eligible canonical families and pushes one message per family onto the
-  `plm-sync` queue, then advances the enqueue watermark.
+  (the delta since the watermark; the first run backfills the full ready set), then reads the
+  changed/eligible canonical items (one per item number) and pushes one message per item onto
+  the `plm-sync` queue, then advances the enqueue watermark.
   NCRONTAB `0 0 12,0 * * *` = 12:00 and 00:00 UTC = 05:00 / 17:00 Pacific. The schedule
   only fires once deployed to Azure (run_on_startup=False).
 
 * plm_wrike_consumer  - Service Bus queue trigger. Processes ONE message: re-reads the
-  family by id and creates/updates its Wrike card. An unhandled exception abandons the
+  item by item_number and creates/updates its Wrike card. An unhandled exception abandons the
   lock so Service Bus retries, then dead-letters after maxDeliveryCount.
 
 Secrets (Wrike tokens, Centric credentials, database and Service Bus connection strings)
@@ -30,7 +30,7 @@ from azure.servicebus import ServiceBusClient, ServiceBusMessage
 from centric_client import make_centric_client
 from db import connect
 from loader import refresh_plm_items
-from plm_reader import read_one_family, sorted_eligible_families
+from plm_reader import read_one_item, sorted_eligible_items
 from settings import load_local_settings
 from state import EPOCH, get_watermark, set_watermark
 from sync import load_sync_context, reconcile_folders, sync_one_family
@@ -41,18 +41,18 @@ app = func.FunctionApp()
 QUEUE = os.environ.get("ServiceBusQueue", "plm-sync")
 
 
-def _family_message(item: dict) -> ServiceBusMessage:
-    """One queue message pointing at a changed family (ids + modified_at, not a snapshot).
+def _item_message(item: dict) -> ServiceBusMessage:
+    """One queue message pointing at a changed item (ids + modified_at, not a snapshot).
 
-    message_id = family_id:modified_at lets Service Bus duplicate detection drop a
-    re-enqueue of the same unchanged family at the broker.
+    message_id = item_number:modified_at lets Service Bus duplicate detection drop a
+    re-enqueue of the same unchanged item at the broker.
     """
     modified = item["modified_at"].isoformat()
     return ServiceBusMessage(
-        json.dumps({"family_id": item["family_id"],
+        json.dumps({"item_number": item["item_number"],
                     "plm_internal_id": item["plm_internal_id"],
                     "modified_at": modified}),
-        message_id=f'{item["family_id"]}:{modified}',
+        message_id=f'{item["item_number"]}:{modified}',
         content_type="application/json",
     )
 
@@ -64,11 +64,11 @@ def plm_wrike_producer(timer: func.TimerRequest) -> None:
     with connect() as conn:
         watermark = get_watermark(conn) or EPOCH
         # Refresh the plm_item mirror from Centric (the delta since the watermark) before
-        # reading it; the first run (watermark == EPOCH) backfills the full active catalogue.
+        # reading it; the first run (watermark == EPOCH) backfills the full ready set.
         refreshed = refresh_plm_items(conn, make_centric_client(), since=watermark, now=now)
         logging.info("PLM->Wrike producer: refreshed %d Centric style(s) into plm_item", refreshed)
-        families = sorted_eligible_families(conn, watermark)
-        if not families:
+        items = sorted_eligible_items(conn, watermark)
+        if not items:
             logging.info("PLM->Wrike producer: nothing changed since %s", watermark)
             return
 
@@ -76,15 +76,15 @@ def plm_wrike_producer(timer: func.TimerRequest) -> None:
         with ServiceBusClient.from_connection_string(conn_str) as sb, \
                 sb.get_queue_sender(QUEUE) as sender:
             # One batched send: the SDK packs the list into broker batches instead of a
-            # round-trip per family.
-            sender.send_messages([_family_message(item) for item in families])
+            # round-trip per item.
+            sender.send_messages([_item_message(item) for item in items])
 
         # Enqueue is the producer's unit of done; the queue owns delivery + retry from
         # here, so the watermark advances once everything is safely queued.
-        set_watermark(conn, max(i["modified_at"] for i in families),
-                      rows_in_delta=len(families), rows_succeeded=len(families),
+        set_watermark(conn, max(i["modified_at"] for i in items),
+                      rows_in_delta=len(items), rows_succeeded=len(items),
                       rows_failed=0)
-    logging.info("PLM->Wrike producer: enqueued %d families onto %s", len(families), QUEUE)
+    logging.info("PLM->Wrike producer: enqueued %d items onto %s", len(items), QUEUE)
 
 
 @app.route(route="reconcile", auth_level=func.AuthLevel.FUNCTION)
@@ -107,19 +107,19 @@ def plm_wrike_reconcile(req: func.HttpRequest) -> func.HttpResponse:
 def plm_wrike_consumer(msg: func.ServiceBusMessage) -> None:
     load_local_settings()
     payload = json.loads(msg.get_body().decode("utf-8"))
-    family_id = payload["family_id"]
+    item_number = payload["item_number"]
     now = datetime.now(timezone.utc)
 
     with connect() as conn:
-        # The message is a pointer, not a snapshot: re-read current DB state by id so a
-        # record edited between enqueue and processing syncs its latest values.
-        item = read_one_family(conn, family_id)
+        # The message is a pointer, not a snapshot: re-read current DB state by item_number
+        # so a record edited between enqueue and processing syncs its latest values.
+        item = read_one_item(conn, item_number)
         if item is None:  # gone / no longer ready since enqueue -> ack and skip
-            logging.info("consumer: family %s no longer eligible; skipping", family_id)
+            logging.info("consumer: item %s no longer eligible; skipping", item_number)
             return
 
         # Let exceptions propagate: an unhandled error abandons the SB lock so the broker
         # redelivers, then dead-letters after maxDeliveryCount (no in-process try/except).
         status = sync_one_family(conn, make_wrike_client, item, load_sync_context(conn), now)
-    logging.info("consumer: family %s -> %s (delivery #%s)",
-                 family_id, status, msg.delivery_count)
+    logging.info("consumer: item %s -> %s (delivery #%s)",
+                 item_number, status, msg.delivery_count)

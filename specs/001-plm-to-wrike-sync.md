@@ -16,6 +16,17 @@
 > folder routing moves to a human-maintained `wrike_folder_map` table with a **staging-folder**
 > fallback. Planned items are marked **(planned)** and unchecked in sections 5–6; the rest of the doc
 > remains as-built. Full decision log: project memory `project_mapping_tables_design`.
+>
+> **2026-06-11 — canonical unit changed to item number.** The de-dup unit moved from the
+> 8-char **family** (`item_number[:8]`) to the full **`item_number`** — one Wrike card per
+> distinct item number, CORE-preferred among that item number's customer rows. This aligns the
+> source grouping with the `item_number` + `customer` identity the Wrike side already uses
+> (existence search, exact match, reconciliation); the family grouping was the lone outlier and
+> over-collapsed distinct item numbers in a family into one card. `pick_canonical` is unchanged;
+> only its grouping key moved. Renames: `resolve_eligible_families`→`resolve_eligible_items`,
+> `sorted_eligible_families`→`sorted_eligible_items`, `read_one_family`→`read_one_item`; the
+> Service Bus message now keys on `item_number`. `family_id` (first 8 chars) is retained as a
+> descriptive/audit column. No schema change.
 
 ---
 
@@ -32,8 +43,8 @@ a card's current state before an update.
 **Producer (timer trigger `plm_wrike_producer`)**
 - WHEN the timer fires (`0 0 12,0 * * *` UTC = 05:00 / 17:00 Pacific), THEN read the watermark,
   select `plm_item` rows with `modified_at` later than the watermark and the eligibility flag set,
-  reduce each family to its canonical record (CORE preferred over CUSTOM), and enqueue one Service
-  Bus message per family.
+  reduce each **item number** to its canonical record (CORE preferred over CUSTOM), and enqueue one
+  Service Bus message per item (2026-06-11: was per family).
 - WHEN messages are enqueued, THEN advance the watermark to the max `modified_at` processed; the
   queue owns delivery and retry from that point. The producer never calls Wrike.
 - WHEN nothing changed since the watermark, THEN log and exit without enqueuing.
@@ -167,8 +178,8 @@ ambiguous cases go to the review table, never the live map.
 - **Item Type via Custom Item Type id**, not the dropdown field (`WRIKE_RETAIL_ITEM_TYPE_ID`,
   create-only).
 - **(planned) Live map is 1:1, keyed `plm_internal_id` ↔ `wrike_task_id` (both unique).** Future
-  syncs go id→id with no search. `pick_canonical` (one canonical record per family) and `customer`
-  create-only are already built and unchanged. `item_number` / `family_id` / `customer` are non-key:
+  syncs go id→id with no search. `pick_canonical` (one canonical record per item number — 2026-06-11,
+  was per family) and `customer` create-only are already built and unchanged. `item_number` / `family_id` / `customer` are non-key:
   `item_number` is the only PLM id also on the card, so it drives verification and lost-map recovery;
   `plm_internal_id` never leaves PG. All per-customer / ambiguous cases go to the review table, so the
   live map stays clean 1:1.

@@ -39,7 +39,7 @@ from mapping import (
     resolve_folder,
 )
 from loader import item_prefix
-from plm_reader import read_item_customer_pairs, sorted_eligible_families
+from plm_reader import read_item_customer_pairs, sorted_eligible_items
 from state import (
     EPOCH,
     dead_letter,
@@ -259,11 +259,11 @@ def run_sync(conn, make_client, *, now, since=None) -> dict:
     watermark = since or get_watermark(conn) or EPOCH
     ctx = load_sync_context(conn)
 
-    families = sorted_eligible_families(conn, watermark)
+    items = sorted_eligible_items(conn, watermark)
     summary = _new_summary()
     ok_mods, held_mods = [], []  # held = deferred or failed: watermark must not pass them
 
-    for item in families:
+    for item in items:
         try:
             status = process_family(
                 conn, make_client, item, ctx["folder_map"], ctx["author_map"], now,
@@ -296,7 +296,7 @@ def run_sync(conn, make_client, *, now, since=None) -> dict:
     else:
         new_watermark = max(ok_mods) if ok_mods else watermark
 
-    set_watermark(conn, new_watermark, rows_in_delta=len(families),
+    set_watermark(conn, new_watermark, rows_in_delta=len(items),
                   rows_succeeded=len(ok_mods), rows_failed=summary["failed"])
     return summary
 
