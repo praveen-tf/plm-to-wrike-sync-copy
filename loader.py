@@ -218,16 +218,17 @@ def style_to_plm_item(style: dict, resolve, *, now: datetime) -> dict:
 
 
 def refresh_plm_items(conn, client, *, since: datetime, now: datetime) -> int:
-    """Pull active styles changed since `since` from Centric, map them, and upsert into
-    plm_item (the local mirror). Returns the number of rows upserted.
+    """Pull ready-for-Wrike styles changed since `since` from Centric, map them, and
+    upsert into plm_item (the local mirror). Returns the number of rows upserted.
 
-    The fetch is NOT gated on ready_for_wrike - reconciliation needs not-ready items too;
-    the producer's delta gates on the ready_for_wrike column. `since` at/<= EPOCH (the
-    first run) pulls the full active catalogue; later runs pull only the modified_after
-    delta.
+    Fetches only mgf_ready_for_wrike=true (the sync targets) - the fast path; `active` is
+    re-checked client-side. `since` at/<= EPOCH (the first run) pulls the full ready set;
+    later runs pull only the modified_after delta. The mirror is therefore ready-only;
+    reconciliation reads it and may over-report not-ready cards as unmapped (accepted -
+    see specs/002).
     """
     modified_after = None if since <= EPOCH else _format_centric_timestamp(since)
-    styles = client.list_styles(modified_after=modified_after)
+    styles = client.list_styles(modified_after=modified_after, mgf_ready_for_wrike="true")
     items = [style_to_plm_item(s, client.resolve_ref, now=now)
              for s in styles if s.get("active")]
     if items:

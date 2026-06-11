@@ -132,8 +132,9 @@ class FakeCentric:
         self._styles = styles
         self.modified_after = "UNSET"
 
-    def list_styles(self, *, modified_after=None):
+    def list_styles(self, *, modified_after=None, **filters):
         self.modified_after = modified_after
+        self.filters = filters
         return self._styles
 
     def resolve_ref(self, endpoint, ref_id):
@@ -172,15 +173,12 @@ def test_refresh_skips_inactive_styles(pg_conn):
     assert {r["plm_internal_id"] for r in rows} == {"S1"}
 
 
-def test_refresh_mirrors_not_ready_styles_but_gates_the_delta(pg_conn):
-    # Not-ready styles are mirrored (reconciliation needs them) but excluded from the
-    # ready-gated delta the producer reads.
-    client = FakeCentric([_style(id="S1", mgf_ready_for_wrike=False)])
-    assert refresh_plm_items(pg_conn, client, since=EPOCH, now=T0) == 1
-    with pg_conn.cursor() as cur:
-        cur.execute("SELECT ready_for_wrike FROM plm_item WHERE plm_internal_id = 'S1'")
-        assert cur.fetchone()[0] is False
-    assert read_changed_items(pg_conn, since=EPOCH) == []
+def test_refresh_requests_only_ready_styles(pg_conn):
+    # The producer's refresh fetches the ready-for-Wrike set server-side (the fast path),
+    # so the mirror is ready-only.
+    client = FakeCentric([_style()])
+    refresh_plm_items(pg_conn, client, since=EPOCH, now=T0)
+    assert client.filters == {"mgf_ready_for_wrike": "true"}
 
 
 def test_refresh_is_idempotent(pg_conn):

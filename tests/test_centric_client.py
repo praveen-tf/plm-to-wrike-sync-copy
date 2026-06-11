@@ -69,6 +69,12 @@ def test_list_styles_paginates_until_short_page():
     assert session.get_calls[1][1] == {"skip": 200, "limit": 200}
 
 
+def test_list_styles_passes_filters():
+    client, session = _client(get_queue=[FakeResp(200, [{"id": "1"}])])
+    client.list_styles(mgf_ready_for_wrike="true")
+    assert session.get_calls[0][1] == {"mgf_ready_for_wrike": "true", "skip": 0, "limit": 200}
+
+
 def test_list_styles_single_short_page_one_call():
     client, session = _client(get_queue=[FakeResp(200, [{"id": "1"}, {"id": "2"}])])
     assert [s["id"] for s in client.list_styles()] == ["1", "2"]

@@ -37,10 +37,12 @@ from 001 reads that mirror exactly as before — none of it changes.
   `centric%3A`, THEN resolve to empty string without a request.
 
 **Refresh / mapping (`loader.py`, refocused Centric → `plm_item`)**
-- WHEN the refresh runs with `since`, THEN fetch all **active** styles modified at/after
-  `since`, map each to a `plm_item` record, and upsert them (idempotent, keyed on
-  `plm_internal_id`). The fetch is **not** gated on `ready_for_wrike` — `ready_for_wrike`
-  is mapped as a column so 001 reconciliation's *ungated* matching keeps working.
+- WHEN the refresh runs with `since`, THEN fetch the **ready-for-Wrike** styles
+  (`mgf_ready_for_wrike=true`) modified at/after `since` (re-checking `active` client-side),
+  map each to a `plm_item` record, and upsert them (idempotent, keyed on `plm_internal_id`).
+  The fetch is ready-only — the fast path (≈11s for the ready set vs >9min for the whole
+  active catalogue on the sandbox), so the mirror is ready-only (see §3 Key Decisions for the
+  reconciliation tradeoff).
 - WHEN mapping a style, THEN apply the field map in §3 (incl. `customer` ← `category_2`
   resolved, `title` ← `item_number[:8] + " " + node_name`, `modified_at` ← `_modified_at`,
   a formula-built `description`), reusing the existing `item_number`-derived `family_id`/
@@ -50,8 +52,8 @@ from 001 reads that mirror exactly as before — none of it changes.
 - WHEN the producer timer fires, THEN refresh the `plm_item` mirror from Centric
   (`since` = current watermark) *before* reading the delta; the rest of the producer
   (delta → enqueue one message per canonical family → advance watermark) is unchanged.
-- WHEN the first run sees no watermark (EPOCH), THEN the refresh pulls the full active
-  catalogue (one-time backfill); subsequent runs pull only the `modified_after` delta.
+- WHEN the first run sees no watermark (EPOCH), THEN the refresh pulls the full ready set
+  (one-time backfill); subsequent runs pull only the `modified_after` delta.
 
 ### Out of Scope
 
@@ -109,15 +111,19 @@ from 001 reads that mirror exactly as before — none of it changes.
 ### Key Decisions
 
 - **Mirror, not direct read.** `plm_item` stays as a Centric-fed cache. This keeps 001's
-  "message = pointer, consumer re-reads by id" design intact, keeps reconciliation's
-  ungated `read_item_customer_pairs` working, and isolates Centric's flakiness (slow
-  spells, spurious 500s) to a single refresh step instead of the per-message path.
+  "message = pointer, consumer re-reads by id" design intact and isolates Centric's flakiness
+  (slow spells, spurious 500s) to a single refresh step instead of the per-message path.
 - **Refresh inside the producer.** One Centric pull per producer run, `since` = the
   current watermark, so the refresh and the existing `modified_at > watermark` delta select
   the same rows. EPOCH on the first run ⇒ automatic full backfill.
-- **Fetch active styles ungated on `ready_for_wrike`.** The mirror must hold not-ready
-  items too (reconciliation maps cards to PLM records regardless of readiness); gating
-  happens on the `ready_for_wrike` *column* in the delta, exactly as in 001.
+- **Fetch ready-only (`mgf_ready_for_wrike=true`), not all-active.** Validated on the live
+  sandbox: the ready set (68 → 24 families) refreshes in **~11s**; the full active+inactive
+  catalogue took **>9min** (dominated by per-id reference resolution over thousands of
+  styles). Ready-only is the sync's actual need and avoids any function-timeout risk.
+  *Tradeoff (accepted, option a):* the mirror is therefore ready-only, so `reconcile_folders`
+  — which matches Wrike cards against `read_item_customer_pairs` *including not-ready records*
+  — may over-report a not-ready card as unmapped (noise in the human-reviewed log). Revisit
+  if reconciliation needs not-ready coverage (it would then do its own broader read).
 - **`requests`, mirroring `wrike_client`.** Same retry/backoff shape; Centric-specific
   additions are trust-JSON-body-over-500 and retry-on-timeout. No new dependency.
 - **`customer` ← resolved `category_2`.** Centric's "Collection" reference holds the
@@ -166,8 +172,9 @@ from 001 reads that mirror exactly as before — none of it changes.
 
 - [x] **Task 1: Centric client.**
       Files: `centric_client.py`, `tests/test_centric_client.py`
-      Details: `CentricClient` — `POST /session` auth (token as `Cookie`); `list_styles(modified_after=None)`
-      paginating `skip`/`limit`=200 over `GET /styles?active=true` until a short page; cached
+      Details: `CentricClient` — `POST /session` auth (token as `Cookie`); `list_styles(modified_after=None, **filters)`
+      paginating `skip`/`limit`=200 over `GET /styles` (filters passed through, e.g.
+      `mgf_ready_for_wrike="true"`) until a short page; cached
       `resolve_ref(endpoint, id)` returning `node_name`/`code` (blank/`centric%3A` → `""`). `requests`
       session with capped backoff like `wrike_client`, plus: parse the JSON body even on 500, retry on
       timeout/503, ~90s timeout. `make_centric_client()` reads `CENTRIC_BASE_URL/USERNAME/PASSWORD`
@@ -191,12 +198,13 @@ from 001 reads that mirror exactly as before — none of it changes.
       `family_id`/`prefix`/`code`; `customer` ← resolved `category_2`; `title` ← `item_number[:8] + " " +
       node_name`; `description` ← `build_description(...)`; `modified_at`/`created_at` ← parsed
       `_modified_at`; `ready_for_wrike` ← `mgf_ready_for_wrike`). `refresh_plm_items(conn, client, *,
-      since, now)` lists active styles `modified_after=since`, maps, and upserts via `load_plm_items`.
+      since, now)` lists ready styles (`mgf_ready_for_wrike="true"`, `modified_after=since`),
+      re-checks `active` client-side, maps, and upserts via `load_plm_items`.
       **(Option B)** KEEP the Excel readers + `COLUMN_MAP` + `to_plm_item` as test-only scaffolding; add
       the new functions alongside them.
       Test (`tests/test_centric_loader.py`): each field maps correctly (incl. ref resolution, HTML
-      strip, customer, title, blanks); refresh upserts and is idempotent; not-ready styles are mirrored
-      (present with the column false).
+      strip, customer, title, blanks); refresh requests the ready filter, skips inactive, upserts, and is
+      idempotent.
 
 - [x] **Task 4: Wire refresh into the producer.** *(depends on: Tasks 1, 3)*
       Files: `function_app.py`
@@ -217,15 +225,15 @@ from 001 reads that mirror exactly as before — none of it changes.
       New coverage lives in `tests/test_centric_client.py` (Task 1), `tests/test_centric_loader.py`
       (Task 3), and a `build_description` case in `tests/test_description.py` (Task 2).
 
-- [ ] **Task 7: README.** *(depends on: Tasks 4, 5)*
+- [x] **Task 7: README.** *(depends on: Tasks 4, 5)*
       Files: `README.md` (via readme-manager)
-      Details: Document the Centric source + refresh-in-producer flow and the `CENTRIC_*` settings;
-      remove the Excel-load instructions.
+      Details: Documented the Centric source + refresh-in-producer flow and the `CENTRIC_*` settings.
+      Wording corrected to **ready-for-Wrike** styles (not all-active) after the ready-only decision.
 
 ## 6. Acceptance Criteria
 
-- [x] All tests pass (`python -m pytest`) — **109 passed** (78 existing + 31 new), nothing skipped,
-      with **no test reaching the live Centric API** (HTTP mocked via an injected fake session).
+- [x] All tests pass (`python -m pytest`) — **110 passed** (78 existing + new Centric/mapper/desc),
+      run against an isolated `plm_test` DB, with **no test reaching the live Centric API** (HTTP mocked).
 - [x] `CentricClient` authenticates (token → `Cookie`), `list_styles` paginates skip/limit until a
       short page, passes `modified_after` for the delta, resolves+caches references, trusts a 500 body,
       and retries timeouts. (`tests/test_centric_client.py`)
@@ -237,9 +245,12 @@ from 001 reads that mirror exactly as before — none of it changes.
       `function_app.py`; `refresh_plm_items` tested incl. full-pull-at-EPOCH vs `modified_after` delta).
       *Note:* the producer timer function itself has no unit test (pre-existing gap — the enqueue/
       watermark logic is unchanged 001 behavior covered via `run_sync`).
-- [x] The mirror holds not-ready styles (column false) so reconciliation's ungated matching still works
-      (`test_refresh_mirrors_not_ready_styles_but_gates_the_delta`); the consumer and reconcile import
-      nothing from `centric_client` — they make **no** Centric calls (by construction).
+- [x] The refresh fetches **ready-only** (`test_refresh_requests_only_ready_styles`) and skips inactive
+      styles; the consumer and reconcile import nothing from `centric_client` — they make **no** Centric
+      calls (by construction). *Tradeoff:* reconciliation may over-report not-ready cards (accepted — §3).
+- [x] **Live-sandbox validation:** ready-only refresh pulled **68 styles → 24 families in ~11s**
+      (vs >9min all-active); auth, `_modified_at` parse (`…917Z`), and `customer`/`product_category`/
+      `brand` resolution all confirmed against `mgf-test.centricsoftware.com`.
 - [x] `pick_canonical` still collapses `*CORE`/`*CUSTOM` siblings sharing a `family_id` (existing
       `test_reader.py` cases pass unchanged; `customer` now comes from resolved `category_2`).
 - [ ] **(Option B — deferred)** The Excel loader, `openpyxl` dep, and `data/input` seed are intentionally

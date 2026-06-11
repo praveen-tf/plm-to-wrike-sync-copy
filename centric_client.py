@@ -75,18 +75,15 @@ class CentricClient:
             raise CentricError(f"GET /{path} -> {resp.status_code}: {resp.text[:300]}")
         raise CentricError("unreachable")
 
-    def list_styles(self, *, modified_after: str | None = None) -> list[dict]:
-        """Active styles, paginated by skip/limit until a short page. `modified_after`
-        (a 'yyyy/mm/ddThh:mm:ss' string) limits the pull to the delta; omit it for a
-        full pull.
-
-        `active=true` is filtered server-side (honored by the sandbox) so we don't page
-        through the entire historical catalogue of inactive styles; the caller also
-        re-checks `active` as a safety net in case an instance ignores the filter."""
+    def list_styles(self, *, modified_after: str | None = None, **filters) -> list[dict]:
+        """Styles matching `filters` (server-side field equality, e.g.
+        mgf_ready_for_wrike="true"), paginated by skip/limit until a short page.
+        `modified_after` (a 'yyyy/mm/ddThh:mm:ss' string) limits the pull to the delta;
+        omit it for a full pull."""
         styles: list[dict] = []
         skip = 0
         while True:
-            params = {"active": "true", "skip": skip, "limit": PAGE_SIZE}
+            params = {**filters, "skip": skip, "limit": PAGE_SIZE}
             if modified_after:
                 params["modified_after"] = modified_after
             page = self._get("styles", **params)

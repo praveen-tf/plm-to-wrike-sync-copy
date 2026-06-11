@@ -51,9 +51,10 @@ Runs on a schedule (`0 0 12,0 * * *`, which is 12:00 and 00:00 UTC, or 05:00 and
 Pacific). On each run it:
 
 1. Reads the watermark (last run timestamp).
-2. Refreshes the `plm_item` mirror from Centric: fetches all active styles modified since the
-   watermark, maps each to a `plm_item` record (resolving references, joining lists, stripping
-   HTML), and upserts them. On the first run, this is a full backfill of the active catalogue.
+2. Refreshes the `plm_item` mirror from Centric: fetches the ready-for-Wrike styles
+   (`mgf_ready_for_wrike=true`) modified since the watermark, maps each to a `plm_item` record
+   (resolving references, joining lists, stripping HTML), and upserts them. On the first run,
+   this is a full backfill of the ready set.
 3. Selects records where `modified_at` is later than the watermark and the eligibility flag
    (`ready_for_wrike`) is set.
 4. Reduces each family to its canonical record.
