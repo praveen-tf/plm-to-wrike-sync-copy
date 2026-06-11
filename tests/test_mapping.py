@@ -90,8 +90,8 @@ def test_update_payload_custom_fields_are_update_eligible_only():
 
 FOLDERS = {"WP": "fold_wp"}
 AUTHORS = {
-    "BAKING": ("Praveen", "WRIKE_TOKEN_PRAVEEN"),
     "CONFECTION": ("Jesse", "WRIKE_TOKEN_JESSE"),
+    "*": ("Praveen", "WRIKE_TOKEN_PRAVEEN"),
 }
 
 
@@ -108,8 +108,14 @@ def test_resolve_folder_unknown_prefix_without_staging_row_is_none():
 
 
 def test_resolve_author_maps_category_to_identity():
-    assert resolve_author("BAKING", AUTHORS) == ("Praveen", "WRIKE_TOKEN_PRAVEEN")
     assert resolve_author("CONFECTION", AUTHORS) == ("Jesse", "WRIKE_TOKEN_JESSE")
+
+
+def test_resolve_author_falls_back_to_catch_all():
+    # Any category without its own row resolves to the '*' row.
+    assert resolve_author("BAKING", AUTHORS) == ("Praveen", "WRIKE_TOKEN_PRAVEEN")
+    assert resolve_author("BRAND NEW CATEGORY", AUTHORS) == ("Praveen", "WRIKE_TOKEN_PRAVEEN")
+    assert resolve_author("BAKING", {"CONFECTION": AUTHORS["CONFECTION"]}) is None
 
 
 def test_load_folder_map_reads_the_db_table(pg_conn):
@@ -136,6 +142,7 @@ def test_customer_match_fails_on_html_polluted_value():
 
 
 def test_author_map_loads_from_db(pg_conn):
+    # The schema seed: CONFECTION -> Jesse plus the '*' catch-all -> Praveen.
     amap = load_category_author_map(pg_conn)
-    assert amap["BAKING"] == ("Praveen", "WRIKE_TOKEN_PRAVEEN")
     assert amap["CONFECTION"] == ("Jesse", "WRIKE_TOKEN_JESSE")
+    assert amap["*"] == ("Praveen", "WRIKE_TOKEN_PRAVEEN")

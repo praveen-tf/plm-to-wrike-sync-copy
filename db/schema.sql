@@ -71,17 +71,18 @@ ON CONFLICT (prefix) DO NOTHING;
 -- ---------------------------------------------------------------------------
 -- Config: product-category -> author identity (Wrike Author = token owner).
 -- token_ref names the app-setting holding that identity's Wrike API token.
+-- The special row product_category = '*' is the catch-all: any category without
+-- its own row resolves to it, so only the exceptions need explicit rows.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS category_author_map (
-    product_category text PRIMARY KEY,
+    product_category text PRIMARY KEY,           -- e.g. CONFECTION; '*' = catch-all
     author           text,
     token_ref        text
 );
 
 INSERT INTO category_author_map (product_category, author, token_ref) VALUES
-    ('BAKING',     'Praveen', 'WRIKE_TOKEN_PRAVEEN'),
-    ('HOT DRINKS', 'Praveen', 'WRIKE_TOKEN_PRAVEEN'),
-    ('CONFECTION', 'Jesse',   'WRIKE_TOKEN_JESSE')
+    ('CONFECTION', 'Jesse',   'WRIKE_TOKEN_JESSE'),
+    ('*',          'Praveen', 'WRIKE_TOKEN_PRAVEEN')
 ON CONFLICT (product_category) DO NOTHING;
 
 -- ---------------------------------------------------------------------------

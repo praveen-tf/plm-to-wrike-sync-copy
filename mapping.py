@@ -114,8 +114,12 @@ def resolve_folder(prefix: str, folder_map: dict) -> tuple[str | None, bool]:
 
 
 def resolve_author(product_category: str, author_map: dict):
-    """Return (author, token_ref) for a product category, or None if unmapped."""
-    return author_map.get(product_category)
+    """Return (author, token_ref) for a product category.
+
+    An unmapped category falls back to the '*' catch-all row (same convention as
+    the folder map), so only the exceptions need their own rows. None only when
+    no '*' row is configured either."""
+    return author_map.get(product_category) or author_map.get("*")
 
 
 def load_folder_map(conn) -> dict[str, str]:
