@@ -25,8 +25,9 @@ beyond confirming the current state of a card before an update.
 ## Architecture
 
 ```
-PostgreSQL (source)
-   -> Producer Function (timer)        reads the change delta, enqueues one message per family
+Centric 8 PLM API
+   -> Producer Function (timer)        refreshes plm_item mirror, reads change delta, enqueues messages
+   -> PostgreSQL (plm_item mirror)     local cache of active Centric styles (read by producer/consumer/reconcile)
    -> Service Bus queue (plm-sync)     decouples and buffers, with a dead-letter queue
    -> Consumer Function (queue trigger) transforms and writes to Wrike, records sync state
    -> Wrike API                        creates or updates the card
@@ -38,8 +39,8 @@ PostgreSQL (source)
 |---|---|
 | Function App (Python) | Hosts three functions: producer (timer), consumer (queue trigger), reconciliation (HTTP) |
 | Service Bus namespace and queue | Decoupling, retry, and dead-lettering between producer and consumer |
-| PostgreSQL | Source records, sync state, live map, folder routing, and unmapped-card log |
-| Key Vault | Wrike tokens, database connection string, Service Bus connection string |
+| PostgreSQL | Centric mirror (`plm_item`), sync state, live map, folder routing, and unmapped-card log |
+| Key Vault | Wrike tokens, Centric credentials, database connection string, Service Bus connection string |
 | Application Insights | Execution logs, failures, and queue metrics |
 
 ## How it works
@@ -49,12 +50,16 @@ PostgreSQL (source)
 Runs on a schedule (`0 0 12,0 * * *`, which is 12:00 and 00:00 UTC, or 05:00 and 17:00
 Pacific). On each run it:
 
-1. Reads the watermark, then selects records where `modified_at` is later than the watermark
-   and the eligibility flag is set.
-2. Reduces each family to its canonical record.
-3. Sends one Service Bus message per family. The message carries identifiers only, not a data
+1. Reads the watermark (last run timestamp).
+2. Refreshes the `plm_item` mirror from Centric: fetches all active styles modified since the
+   watermark, maps each to a `plm_item` record (resolving references, joining lists, stripping
+   HTML), and upserts them. On the first run, this is a full backfill of the active catalogue.
+3. Selects records where `modified_at` is later than the watermark and the eligibility flag
+   (`ready_for_wrike`) is set.
+4. Reduces each family to its canonical record.
+5. Sends one Service Bus message per family. The message carries identifiers only, not a data
    snapshot, so the consumer always acts on the current database state.
-4. Advances the watermark once the messages are enqueued. Delivery and retry are then owned by
+6. Advances the watermark once the messages are enqueued. Delivery and retry are then owned by
    the queue.
 
 The producer does not call Wrike.
@@ -114,7 +119,7 @@ The schema is defined in `db/schema.sql`.
 
 | Table | Purpose |
 |---|---|
-| `plm_item` | Source records, one row per PLM variant |
+| `plm_item` | Local mirror of active Centric styles (refreshed from Centric API on each producer run) |
 | `category_author_map` | Product category to author token mapping |
 | `sync_watermark` | Incremental cursor and last-run statistics |
 | `wrike_task_map` | 1:1 live map (PLM record ↔ Wrike card); keys: `plm_internal_id` (PK) ↔ `wrike_task_id` (UNIQUE); columns `item_number`, `family_id`, `customer` for audit/recovery |
@@ -134,6 +139,10 @@ configuration itself.
 | `ServiceBusConnection` | Queue listener connection (consumer) | Key Vault reference |
 | `ServiceBusSendConnection` | Queue sender connection (producer) | Key Vault reference |
 | `ServiceBusQueue` | Queue name, default `plm-sync` | Plain value |
+| `CENTRIC_BASE_URL` | Centric 8 API base URL (e.g., `https://company-sandbox.centricsoftware.com`) | Plain value |
+| `CENTRIC_USERNAME` | Centric API user account | Key Vault reference |
+| `CENTRIC_PASSWORD` | Centric API user password | Key Vault reference |
+| `CENTRIC_API_VERSION` | Centric API version, default `v2` | Plain value |
 | `WRIKE_TOKEN_<NAME>` | Wrike API token per author identity | Key Vault reference |
 | `WRIKE_HOST` | Wrike API host, default `www.wrike.com` | Plain value |
 | `WRIKE_RETAIL_ITEM_TYPE_ID` | Custom Item Type id for new cards | Plain value |
@@ -145,19 +154,22 @@ never searches Wrike for folders by name. A special `'*'` row in `wrike_folder_m
 a fallback staging folder for unmapped prefixes. If no `'*'` row is present, items with
 unmapped prefixes defer (safe degradation).
 
+For details on Centric authentication and the field mapping from Centric to `plm_item`, see
+`project_docs/centric_8_api.md` and `specs/002-centric-8-api-source.md`.
+
 ## Deployment using the Azure portal
 
 1. Resource group. Create a resource group to hold all resources.
 
 2. PostgreSQL. Create an Azure Database for PostgreSQL Flexible Server. Apply `db/schema.sql`
-   to create the tables. Load the source records into `plm_item`.
+   to create the tables.
 
 3. Service Bus. Create a Service Bus namespace on the Standard tier. Add a queue named
    `plm-sync` and set maximum delivery count to 10, enable dead-lettering on message
    expiration, and enable duplicate detection. The dead-letter queue is created automatically.
 
-4. Key Vault. Create a Key Vault. Add the Wrike tokens, the PostgreSQL connection string, and
-   the Service Bus connection string as secrets.
+4. Key Vault. Create a Key Vault. Add the Centric credentials, Wrike tokens, the PostgreSQL
+   connection string, and the Service Bus connection string as secrets.
 
 5. Function App. Create a Function App with the Python runtime. Open Identity and enable the
    system-assigned managed identity. In the Key Vault access policies, grant that identity Get
@@ -239,4 +251,5 @@ truncate the state tables during execution. Before running a live sync batch aft
 reload the seed data to reset the sync state.
 
 The application reads settings locally from `local.settings.json`, which is excluded from
-version control. Use `local.settings.json.example` as a template.
+version control. Use `local.settings.json.example` as a template. To run the producer locally
+(e.g., to test a Centric refresh), populate the Centric settings in `local.settings.json`.

@@ -2,8 +2,10 @@
 
 Two functions share one codebase (see README.md):
 
-* plm_wrike_producer  - timer. Reads the changed/eligible canonical families and pushes
-  one message per family onto the `plm-sync` queue, then advances the enqueue watermark.
+* plm_wrike_producer  - timer. Refreshes the local plm_item mirror from the Centric 8 API
+  (the delta since the watermark; the first run backfills the full active catalogue), then
+  reads the changed/eligible canonical families and pushes one message per family onto the
+  `plm-sync` queue, then advances the enqueue watermark.
   NCRONTAB `0 0 12,0 * * *` = 12:00 and 00:00 UTC = 05:00 / 17:00 Pacific. The schedule
   only fires once deployed to Azure (run_on_startup=False).
 
@@ -11,9 +13,9 @@ Two functions share one codebase (see README.md):
   family by id and creates/updates its Wrike card. An unhandled exception abandons the
   lock so Service Bus retries, then dead-letters after maxDeliveryCount.
 
-Secrets (Wrike tokens, database and Service Bus connection strings) come from Key Vault
-references in the Function App settings. The test suite runs against a local Postgres
-(see db.py for connection defaults and README.md for setup).
+Secrets (Wrike tokens, Centric credentials, database and Service Bus connection strings)
+come from Key Vault references in the Function App settings. The test suite runs against a
+local Postgres (see db.py for connection defaults and README.md for setup).
 """
 from __future__ import annotations
 
@@ -25,7 +27,9 @@ from datetime import datetime, timezone
 import azure.functions as func
 from azure.servicebus import ServiceBusClient, ServiceBusMessage
 
+from centric_client import make_centric_client
 from db import connect
+from loader import refresh_plm_items
 from plm_reader import read_one_family, sorted_eligible_families
 from settings import load_local_settings
 from state import EPOCH, get_watermark, set_watermark
@@ -56,8 +60,13 @@ def _family_message(item: dict) -> ServiceBusMessage:
 @app.timer_trigger(schedule="0 0 12,0 * * *", arg_name="timer", run_on_startup=False)
 def plm_wrike_producer(timer: func.TimerRequest) -> None:
     load_local_settings()
+    now = datetime.now(timezone.utc)
     with connect() as conn:
         watermark = get_watermark(conn) or EPOCH
+        # Refresh the plm_item mirror from Centric (the delta since the watermark) before
+        # reading it; the first run (watermark == EPOCH) backfills the full active catalogue.
+        refreshed = refresh_plm_items(conn, make_centric_client(), since=watermark, now=now)
+        logging.info("PLM->Wrike producer: refreshed %d Centric style(s) into plm_item", refreshed)
         families = sorted_eligible_families(conn, watermark)
         if not families:
             logging.info("PLM->Wrike producer: nothing changed since %s", watermark)

@@ -15,6 +15,11 @@
     "WRIKE_HOST": "www.wrike.com",
     "WRIKE_RETAIL_ITEM_TYPE_ID": "<Custom Item Type id for 'Retail Item' (GET /custom_item_types)>",
 
+    "CENTRIC_BASE_URL": "<e.g. https://company-sandbox.centricsoftware.com>",
+    "CENTRIC_USERNAME": "<Centric API username>",
+    "CENTRIC_PASSWORD": "<Centric API password>",
+    "CENTRIC_API_VERSION": "v2",
+
     "APPLICATIONINSIGHTS_CONNECTION_STRING": "<from App Insights resource>"
   }
 }

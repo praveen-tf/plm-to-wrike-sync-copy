@@ -14,6 +14,21 @@ _HEADER_RE = re.compile(r"<h5>\s*([^<:]+?)\s*:\s*</h5>")
 _TRAIL_RE = re.compile(r"((?:<br>|\s)*)$")
 
 
+def build_description(material_codes: str | None, contents: str | None) -> str:
+    """Build a new card's PLM-owned description: the Material Codes then Contents
+    sections, joined by <br>, in the same `<h5>Label:     </h5>body` format the cards use.
+
+    Used at card creation (the Centric source has no pre-formatted description). Later
+    syncs call merge_description, which replaces only these section bodies and leaves any
+    Wrike-owned content untouched - so build the headers in a shape merge_description can
+    retarget.
+    """
+    return (
+        f"<h5>Material Codes:     </h5>{material_codes or ''}"
+        f"<br><h5>Contents:     </h5>{contents or ''}"
+    )
+
+
 def merge_description(existing: str, *, material_codes: str | None = None,
                       contents: str | None = None) -> str:
     """Replace only the Material Codes / Contents section bodies; preserve the rest.
