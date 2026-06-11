@@ -12,8 +12,8 @@ Two functions share one codebase (see README.md):
   lock so Service Bus retries, then dead-letters after maxDeliveryCount.
 
 Secrets (Wrike tokens, database and Service Bus connection strings) come from Key Vault
-references in the Function App settings. The test suite runs locally against the Postgres
-in docker-compose; see README.md.
+references in the Function App settings. The test suite runs against a local Postgres
+(see db.py for connection defaults and README.md for setup).
 """
 from __future__ import annotations
 

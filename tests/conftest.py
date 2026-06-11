@@ -10,7 +10,7 @@ def pg_conn():
     """A live Postgres connection with the state tables truncated for test isolation.
 
     Skips (rather than fails) when the local Postgres isn't reachable, so the
-    pure-logic unit tests still run without Docker.
+    pure-logic unit tests still run without a database.
 
     Note: wrike_folder_map is truncated too - tests own its contents (see
     seed_folder_map). On the shared dev DB the real seed rows are restored by
@@ -19,7 +19,7 @@ def pg_conn():
     try:
         conn = connect()
     except psycopg.OperationalError as exc:
-        pytest.skip(f"Postgres not reachable (is docker compose up?): {exc}")
+        pytest.skip(f"Postgres not reachable (is it running, and are PG_* set?): {exc}")
     conn.autocommit = True
     with conn.cursor() as cur:
         cur.execute(

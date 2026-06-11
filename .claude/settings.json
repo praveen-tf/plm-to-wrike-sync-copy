@@ -7,5 +7,9 @@
     ]
   },
   "enableAllProjectMcpServers": true,
-  "plansDirectory": "./specs"
+  "plansDirectory": "./specs",
+  "attribution": {
+    "commit": "",
+    "pr": ""
+  }
 }

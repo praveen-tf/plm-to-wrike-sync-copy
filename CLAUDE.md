@@ -71,7 +71,6 @@ settings.py            # Layer 3: Configuration and environment variables
 host.json               # Azure Functions host config
 local.settings.json     # Local Functions settings (gitignored; see .example)
 requirements.txt        # Runtime dependencies (pip — installed server-side on deploy)
-docker-compose.yml      # Local Postgres for running the test suite
 scripts/                # Operational helper scripts (e.g. trigger_azure.sh)
 project_docs/           # Reference docs + internal deployment/runbook docs (currently gitignored)
 tests/

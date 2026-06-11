@@ -1,6 +1,6 @@
 -- PLM -> Wrike sync POC schema.
--- Runs automatically on first container init (see docker-compose.yml).
--- Re-runnable by hand: every object uses IF NOT EXISTS / idempotent seeds.
+-- Apply with: psql -U plm -d plm -f db/schema.sql
+-- Re-runnable: every object uses IF NOT EXISTS / idempotent seeds / guarded migrations.
 
 -- ---------------------------------------------------------------------------
 -- Source table: one row per PLM variant (simulated from Excel + synthetic CSV).
@@ -124,8 +124,8 @@ CREATE TABLE IF NOT EXISTS wrike_task_map (
     updated_at           timestamptz              -- last sync attempt (created_at = first)
 );
 
--- For DBs created before the outcome columns existed (the docker volume persists across
--- restarts, so CREATE TABLE IF NOT EXISTS won't add them) - idempotent backfill:
+-- For DBs created before the outcome columns existed (CREATE TABLE IF NOT EXISTS
+-- won't add columns to an existing table) - idempotent backfill:
 ALTER TABLE wrike_task_map
     ADD COLUMN IF NOT EXISTS sync_status   text,
     ADD COLUMN IF NOT EXISTS retry_count   int DEFAULT 0,

@@ -211,10 +211,32 @@ unmapped prefixes defer (safe degradation).
 A local environment is provided for running the test suite. It is not required for the Azure
 deployment.
 
+1. Set up a local PostgreSQL instance with a `plm` database and `plm` role. The defaults
+   are `localhost:5432`, `db plm`, `user plm`, `password plm_local_pw`. To override, set
+   any of `PG_HOST`, `PG_PORT`, `PG_DB`, `PG_USER`, `PG_PASSWORD`, or use a single `PG_CONN`
+   connection string.
+
+2. Apply the schema (idempotent, includes guarded migrations):
+
 ```
-docker compose up -d        # PostgreSQL on localhost:5433, applies db/schema.sql
-python -m pytest            # unit and database-backed tests
+psql -h localhost -U plm -d plm -f db/schema.sql
 ```
 
-The application reads the same settings locally from `local.settings.json`, which is excluded
-from version control. Use `local.settings.json.example` as a template.
+3. Optionally load the sample data:
+
+```
+psql -h localhost -U plm -d plm -f seed_plm_item.sql
+```
+
+4. Run the test suite:
+
+```
+python -m pytest
+```
+
+Tests automatically skip database-backed cases if PostgreSQL is unreachable. Note that tests
+truncate the state tables during execution. Before running a live sync batch after tests,
+reload the seed data to reset the sync state.
+
+The application reads settings locally from `local.settings.json`, which is excluded from
+version control. Use `local.settings.json.example` as a template.
