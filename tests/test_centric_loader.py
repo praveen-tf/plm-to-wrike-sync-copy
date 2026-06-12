@@ -18,6 +18,7 @@ _REFS = {
     ("category2s", "cat2"): "*CORE",
     ("category1s", "cat1"): "BAKING",
     ("collections", "coll"): "WINNIE-THE-POOH",
+    ("seasons", "season1"): "2026 FALL/HOLIDAY",
 }
 
 
@@ -34,6 +35,7 @@ def _style(**over):
         "category_2": "cat2",          # -> customer *CORE
         "category_1": "cat1",          # -> product_category BAKING
         "collection": "coll",          # -> brand
+        "parent_season": "season1",    # -> season
         "mgf_print_method": ["MATTE", "FOIL"],
         "mgf_previous_item_number": "WP-68151",
         "mgf_test_material": "<p>- WINNIE THE POOH PAN</p>",
@@ -62,6 +64,7 @@ def test_maps_identity_and_resolved_reference_fields():
     assert item["customer"] == "*CORE"               # resolved category_2
     assert item["product_category"] == "BAKING"      # resolved category_1
     assert item["brand"] == "WINNIE-THE-POOH"        # resolved collection
+    assert item["season"] == "2026 FALL/HOLIDAY"     # resolved parent_season
 
 
 def test_maps_scalar_and_list_fields():
@@ -79,10 +82,14 @@ def test_maps_scalar_and_list_fields():
 def test_blanks_and_unsourced_native_fields():
     item = style_to_plm_item(_style(), _resolve, now=T0)
     assert item["design_brief"] == ""
-    assert item["season"] == ""
     assert item["status"] is None
     assert item["priority"] is None
     assert item["end_date"] is None
+
+
+def test_season_blank_when_parent_season_missing():
+    item = style_to_plm_item(_style(parent_season=None), _resolve, now=T0)
+    assert item["season"] == ""
 
 
 def test_builds_description_from_material_codes_and_contents():

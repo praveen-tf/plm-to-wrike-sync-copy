@@ -207,7 +207,7 @@ def style_to_plm_item(style: dict, resolve, *, now: datetime) -> dict:
         "brand_category": style.get("mgf_brand_category_2") or "",
         "product_category": resolve("category1s", style.get("category_1")),  # drives author map
         "brand": resolve("collections", style.get("collection")),
-        "season": "",                       # /seasons broken on the sandbox -> blank
+        "season": resolve("seasons", style.get("parent_season")),
         "design_request": style.get("mgf_item_description") or "",
         "design_brief": "",
         "image_link": style.get("mgf_image_link") or "",

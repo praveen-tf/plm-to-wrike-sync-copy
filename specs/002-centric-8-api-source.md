@@ -64,7 +64,10 @@ from 001 reads that mirror exactly as before — none of it changes.
   one place (the producer's refresh). The consumer still re-reads `plm_item` by id.
 - Deleting / deactivating mirror rows when a style goes inactive or is removed in Centric
   (no delete propagation — consistent with 001's no-card-deletion stance).
-- Season resolution (`/seasons` is broken on the sandbox — `season` stays blank).
+- ~~Season resolution (`/seasons` is broken on the sandbox — `season` stays blank).~~
+  *Amended 2026-06-12:* `/seasons` works on the sandbox now (verified live:
+  `C19349478` → `2026 FALL/HOLIDAY`), so `season` ← `parent_season` resolved via
+  `/seasons`, same cached `resolve_ref` path as the other references.
 - Two-way sync, webhooks/event-driven pulls, or season-scoped fetching.
 
 ## 3. Design
@@ -85,6 +88,7 @@ from 001 reads that mirror exactly as before — none of it changes.
 | `customer` | `category_2` → resolve `/category2s` | e.g. `*CORE` / `*CUSTOM`; drives `pick_canonical` + the create-only "Customer" Wrike field |
 | `product_category` | `category_1` → resolve `/category1s` | drives author mapping |
 | `brand` | `collection` → resolve `/collections` | |
+| `season` | `parent_season` → resolve `/seasons` | added 2026-06-12 — originally blank because `/seasons` was broken on the sandbox |
 | `design_request` | `mgf_item_description` | |
 | `image_link` | `mgf_image_link` | |
 | `description` | **formula**: section-built from `material_codes` + `contents` | new `build_description()` (§ below) |
@@ -92,7 +96,7 @@ from 001 reads that mirror exactly as before — none of it changes.
 | `ready_for_wrike` | `mgf_ready_for_wrike` | eligibility gate (column, not a fetch filter) |
 | `modified_at` | `_modified_at` (parsed to timestamptz) | the watermark — Centric's *only* timestamp |
 | `created_at` | `modified_at` (the parsed `_modified_at`) | the API has **no** creation timestamp (confirmed: only `_modified_at`); reuse the real watermark value, not a dummy. Only feeds `pick_canonical`'s rare no-CORE/no-CUSTOM tiebreak |
-| `design_brief`, `season`, `status`, `priority`, `end_date`, `folder`, `workflow`, `custom_status` | blank / `None` | not sourced; `None` → omitted from the Wrike payload / Wrike defaults |
+| `design_brief`, `status`, `priority`, `end_date`, `folder`, `workflow`, `custom_status` | blank / `None` | not sourced; `None` → omitted from the Wrike payload / Wrike defaults |
 
 ### Affected Files
 
@@ -239,9 +243,9 @@ from 001 reads that mirror exactly as before — none of it changes.
       short page, passes `modified_after` for the delta, resolves+caches references, trusts a 500 body,
       and retries timeouts. (`tests/test_centric_client.py`)
 - [x] `style_to_plm_item` produces the §3 field map — ref resolution (`customer` ← resolved
-      `category_2`, `product_category`, `brand`), `print_method` join, `contents` HTML strip, `title`
-      formula, the formula `description`, `modified_at`/`created_at` ← `_modified_at`, blank
-      `design_brief`/`season`. (`tests/test_centric_loader.py`)
+      `category_2`, `product_category`, `brand`, `season` ← resolved `parent_season`), `print_method`
+      join, `contents` HTML strip, `title` formula, the formula `description`,
+      `modified_at`/`created_at` ← `_modified_at`, blank `design_brief`. (`tests/test_centric_loader.py`)
 - [x] The producer refreshes the mirror from Centric before reading the delta (wired in
       `function_app.py`; `refresh_plm_items` tested incl. full-pull-at-EPOCH vs `modified_after` delta).
       *Note:* the producer timer function itself has no unit test (pre-existing gap — the enqueue/

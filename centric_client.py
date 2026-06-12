@@ -1,8 +1,8 @@
 """Minimal Centric 8 PLM REST client used to refresh the local plm_item mirror.
 
 Session auth: POST /session returns a token that is sent as the `Cookie` header on every
-later request. Reference ids (category_1/2, collection) are resolved to display names via
-each entity's own endpoint and cached per client. Built on `requests`, mirroring
+later request. Reference ids (category_1/2, collection, parent_season) are resolved to
+display names via each entity's own endpoint and cached per client. Built on `requests`, mirroring
 `wrike_client.py`, with the two Centric sandbox quirks handled (see
 `project_docs/centric_8_api.md`): the server is intermittently very slow (retry on
 timeout / 5xx with capped backoff) and sometimes returns HTTP 500 with a full valid JSON
