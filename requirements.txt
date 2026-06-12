@@ -2,6 +2,5 @@ azure-functions
 azure-servicebus
 requests
 pytest
-openpyxl
 psycopg[binary]
 tzdata  # IANA tz database for zoneinfo (Pacific sync marker); not bundled on Windows/slim images

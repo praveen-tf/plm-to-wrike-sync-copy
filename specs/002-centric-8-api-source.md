@@ -147,16 +147,17 @@ from 001 reads that mirror exactly as before — none of it changes.
 
 | Document | Location | What to look for |
 |----------|----------|------------------|
-| Centric 8 API | `project_docs/centric_8_api.md` | `POST /session` auth + `Cookie` token, `GET /styles` skip/limit, `modified_after` format `yyyy/mm/ddThh:mm:ss` (assume UTC — confirm on sandbox), ref-resolution endpoints, the 500-with-body / slow-server quirks |
+| Centric 8 API | `project_docs/centric_8_api.md` | `POST /session` auth + `Cookie` token, `GET /styles` skip/limit, `modified_after` format `2026-06-12T10:23:36Z` (ISO 8601 UTC + `Z`, **verified** — other forms 400), ref-resolution endpoints, the 500-with-body / slow-server quirks |
 | As-built engine | `specs/001-plm-to-wrike-sync.md` | The producer/consumer/reconcile flow this feeds; the `plm_item` schema + canonical rule |
 | Wrike client pattern | `wrike_client.py` | Session + capped-backoff `_request` shape to mirror in `centric_client.py` |
 | Testing guidelines | `agent_docs/testing_guidelines.md` | Fixture patterns; mocking HTTP without hitting the live sandbox |
 | Style / logging | `agent_docs/style_guidelines.md`, `agent_docs/logging_guidelines.md` | Naming, log levels |
 
-> **Note (confirm on sandbox during Task 1):** format `modified_after` as the standard
-> `yyyy/mm/ddThh:mm:ss` (year/month/day) — the project doc's `yyyy/dd/mm` was a typo from
-> the 2017 guide, now corrected. Assume UTC; confirm the timezone against the live server
-> when wiring the watermark and update the project doc if it differs.
+> **RESOLVED (2026-06-12, verified on sandbox):** `modified_after` MUST be ISO 8601 UTC with a
+> `Z` suffix, e.g. `2026-06-12T10:23:36Z`. This is the *only* accepted form — `yyyy/mm/dd…`,
+> no-`Z`, space-separated, and date-only variants all return HTTP 400. Sending the wrong format
+> made every delta run (watermark != EPOCH) silently fail on the refresh, creating nothing.
+> Fixed in `loader._format_centric_timestamp`.
 
 ## 5. Implementation Checklist
 
@@ -171,9 +172,12 @@ from 001 reads that mirror exactly as before — none of it changes.
 > + new tests now; keep the Excel readers/data as *test-only* scaffolding so the 78 existing
 > tests stay green; delete them in a follow-up once the Centric path is validated on the live
 > sandbox (where `_modified_at`/`modified_after` format is still unverified).
-> **Chosen: B (2026-06-11).** Tasks 3/5/6 below are amended for B: nothing is deleted this
-> round; the Excel half of `loader.py`, `data/input/*`, and `openpyxl` stay. A follow-up spec
-> handles their removal after live validation.
+> **Chosen: B (2026-06-11), then completed (2026-06-12).** B shipped first (Excel kept as
+> scaffolding); after live validation the follow-up was done: the Excel readers + `COLUMN_MAP`
+> + `to_plm_item` were removed from `loader.py`, `data/input/*` + `seed_plm_item.sql` deleted,
+> `openpyxl` dropped, and the test data-loading (`fixtures_mapping`, `test_sync`, `test_reader`,
+> `test_db_load`) was rebuilt on Centric `plm_row`/`load_sample_items` fixtures; `test_loader.py`
+> (pure Excel-mapper tests) was deleted.
 
 - [x] **Task 1: Centric client.**
       Files: `centric_client.py`, `tests/test_centric_client.py`
@@ -258,7 +262,7 @@ from 001 reads that mirror exactly as before — none of it changes.
       `brand` resolution all confirmed against `mgf-test.centricsoftware.com`.
 - [x] `pick_canonical` still collapses `*CORE`/`*CUSTOM` siblings sharing a `family_id` (existing
       `test_reader.py` cases pass unchanged; `customer` now comes from resolved `category_2`).
-- [ ] **(Option B — deferred)** The Excel loader, `openpyxl` dep, and `data/input` seed are intentionally
-      retained this round; their removal moves to a follow-up after live-sandbox validation.
+- [x] **(2026-06-12)** The Excel loader, `openpyxl` dep, `data/input` seed, and `seed_plm_item.sql` are
+      removed; test data-loading runs on Centric `plm_row`/`load_sample_items` fixtures (no `.xlsx`/`.csv`).
 - [x] README reflects the Centric source — architecture, producer, data-model, configuration, and
       deployment sections updated (the remaining "Excel" mentions are the unrelated unmapped-log export).

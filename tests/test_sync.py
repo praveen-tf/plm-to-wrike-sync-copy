@@ -1,5 +1,4 @@
 from datetime import datetime, timezone
-from pathlib import Path
 
 from conftest import seed_folder_map, task_map_entry, unmapped_log
 from fixtures_mapping import (
@@ -9,14 +8,14 @@ from fixtures_mapping import (
     LT_FOLDER,
     STAGING_FOLDER,
     WP_FOLDER,
+    load_sample_items,
     plm_row,
     wrike_card,
 )
-from loader import load_plm_items, read_source_rows, to_plm_item
+from loader import load_plm_items
 from state import get_task_map_entry_by_plm_id
 from sync import load_sync_context, reconcile_folders, run_sync
 
-DATA = Path(__file__).resolve().parent.parent / "data" / "input"
 EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 T0 = datetime(2026, 6, 2, 12, 0, tzinfo=timezone.utc)
 T1 = datetime(2026, 6, 3, 12, 0, tzinfo=timezone.utc)
@@ -130,9 +129,7 @@ class FlakyRegistry(Registry):
 
 
 def _load(conn, now=T0):
-    rows = read_source_rows(DATA / "winnie_the_pooh_input.xlsx",
-                            DATA / "synthetic_jesse_confection.csv")
-    load_plm_items(conn, [to_plm_item(r, now=now) for r in rows])
+    load_sample_items(conn, now=now)
     # '*' is the staging-fallback row: unmapped prefixes route there.
     seed_folder_map(conn, {"WP": WP_FOLDER, "LT": LT_FOLDER, "*": STAGING_FOLDER})
 

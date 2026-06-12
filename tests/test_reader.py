@@ -1,19 +1,13 @@
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
-from loader import load_plm_items, read_source_rows, to_plm_item
+from fixtures_mapping import load_sample_items
 from plm_reader import pick_canonical, read_changed_items, read_one_item, resolve_eligible_items
 
-DATA = Path(__file__).resolve().parent.parent / "data" / "input"
 T0 = datetime(2026, 6, 2, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def _load_all(conn, now=T0):
-    rows = read_source_rows(
-        DATA / "winnie_the_pooh_input.xlsx",
-        DATA / "synthetic_jesse_confection.csv",
-    )
-    load_plm_items(conn, [to_plm_item(r, now=now) for r in rows])
+    load_sample_items(conn, now=now)
 
 
 def _v(customer, *, created, modified, pid="x"):

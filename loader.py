@@ -1,80 +1,16 @@
-"""Load `plm_item` records into Postgres.
+"""Load `plm_item` records into Postgres from the Centric 8 PLM API.
 
-Primary source: the Centric 8 PLM API (`style_to_plm_item` + `refresh_plm_items`, the live
-sync source). The Excel `Wrike` sheet / synthetic-CSV readers below are retained as test and
-local-seed scaffolding. Both paths feed the same `load_plm_items` upsert.
+`style_to_plm_item` maps one Centric style to a plm_item record; `refresh_plm_items` pulls
+the ready-for-Wrike delta from Centric and upserts it via `load_plm_items`.
 """
 from __future__ import annotations
 
-import csv
 import html
 import re
 from datetime import datetime, timezone
-from pathlib import Path
 
 from description import build_description
 from state import EPOCH
-
-
-def _read_excel_wrike_sheet(path) -> list[dict]:
-    import warnings
-
-    import openpyxl
-
-    with warnings.catch_warnings():
-        # openpyxl warns about an unsupported data-validation extension in this file; benign.
-        warnings.filterwarnings("ignore", message="Data Validation extension is not supported")
-        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-        ws = wb["Wrike"]
-        rows = ws.iter_rows(values_only=True)
-        header = ["" if h is None else str(h) for h in next(rows)]
-        out = []
-        for r in rows:
-            if all(c is None or str(c).strip() == "" for c in r):
-                continue  # skip blank rows
-            out.append({header[i]: ("" if c is None else str(c)) for i, c in enumerate(r)})
-    return out
-
-
-def _read_csv(path) -> list[dict]:
-    with open(path, newline="", encoding="utf-8") as f:
-        return list(csv.DictReader(f))
-
-
-def read_source_rows(excel_path, csv_path=None) -> list[dict]:
-    """Return the union of the Excel `Wrike` sheet and (optional) synthetic CSV rows."""
-    rows = _read_excel_wrike_sheet(excel_path)
-    if csv_path and Path(csv_path).exists():
-        rows += _read_csv(csv_path)
-    return rows
-
-# Source column header -> plm_item field name.
-COLUMN_MAP = {
-    "Key": "plm_internal_id",
-    "PLM - Item #": "item_number",
-    "PLM Item Name": "item_name",
-    "Title": "title",
-    "Folder": "folder",
-    "Workflow": "workflow",
-    "Status": "status",
-    "Custom status": "custom_status",
-    "Priority": "priority",
-    "End Date": "end_date",
-    "Description": "description",
-    "Print Method": "print_method",
-    "Previous Item No": "previous_item_no",
-    "PLM - Contents": "contents",
-    "PLM - Material Codes": "material_codes",
-    "Brand Category": "brand_category",
-    "Customer": "customer",
-    "Product Category": "product_category",
-    "Brand": "brand",
-    "Season": "season",
-    "PLM - Design Request": "design_request",
-    "Design Brief / Additional Notes": "design_brief",
-    "Image Link": "image_link",
-}
-
 
 PLM_ITEM_COLUMNS = [
     "plm_internal_id", "item_number", "family_id", "prefix", "code", "item_name",
@@ -108,28 +44,6 @@ def item_prefix(item_number: str) -> str:
     return match.group(0) if match else ""
 
 
-def to_plm_item(row: dict, *, now) -> dict:
-    item = {field: row.get(col) for col, field in COLUMN_MAP.items()}
-
-    item_number = item["item_number"]
-    parts = item_number.split("-")
-    item["family_id"] = item_number[:8]
-    item["prefix"] = item_prefix(item_number)
-    item["code"] = parts[1] if len(parts) > 1 else ""
-
-    # synthesized control columns (absent from the source Excel):
-    item["ready_for_wrike"] = True
-    item["created_at"] = now
-    item["modified_at"] = now
-    return item
-
-
-# ---------------------------------------------------------------------------
-# Centric 8 API source: map styles -> plm_item and refresh the local mirror.
-# (The Excel/CSV path above is retained as test/local-seed scaffolding.)
-# ---------------------------------------------------------------------------
-
-
 def strip_html(text: str | None) -> str:
     """Plain text from a Centric HTML field: drop tags, unescape entities, trim blank
     lines (e.g. mgf_test_material -> contents)."""
@@ -144,9 +58,9 @@ def strip_html(text: str | None) -> str:
 def _parse_centric_timestamp(value) -> datetime | None:
     """Parse a Centric `_modified_at` value to an aware UTC datetime; None if absent.
 
-    The sandbox's exact format is unconfirmed (see project_docs/centric_8_api.md), so
-    accept ISO 8601 and Centric's 'yyyy/mm/ddThh:mm:ss', assuming UTC when naive. A
-    present-but-unparseable value raises loudly rather than silently defaulting.
+    The inbound `_modified_at` is ISO 8601 UTC with a 'Z' (e.g. 2026-06-12T11:22:48.795Z);
+    the slash-format parsers are kept as tolerant fallbacks. A present-but-unparseable value
+    raises loudly rather than silently defaulting.
     """
     if not value:
         return None
@@ -166,8 +80,12 @@ def _parse_centric_timestamp(value) -> datetime | None:
 
 
 def _format_centric_timestamp(dt: datetime) -> str:
-    """A datetime as Centric's `modified_after` query string (yyyy/mm/ddThh:mm:ss, UTC)."""
-    return dt.astimezone(timezone.utc).strftime("%Y/%m/%dT%H:%M:%S")
+    """A datetime as Centric's `modified_after` query string: ISO 8601 UTC with a 'Z'
+    suffix, e.g. 2026-06-12T10:23:36Z. Verified on the sandbox - this is the ONLY accepted
+    form; no-Z, space-separated, slash-dated, and date-only variants all return 400.
+    Truncates to whole seconds (floor), so the delta never rounds past a changed item.
+    """
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def style_to_plm_item(style: dict, resolve, *, now: datetime) -> dict:
