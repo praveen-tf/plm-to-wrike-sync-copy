@@ -74,9 +74,15 @@ def _current_custom_fields(task: dict) -> dict:
 
 def _managed_folder_ids(client, folder_map: dict) -> set[str]:
     """The wrike_folder_map folder ids (incl. the '*' staging row) as Wrike v4 ids.
-    folder_map is {prefix -> {brand -> folder id}}, so flatten the inner brand dicts."""
-    return {client.resolve_folder_id(fid)
-            for brands in folder_map.values() for fid in brands.values()}
+
+    folder_map is {prefix -> {brand -> folder id}} and the ids are stored NUMERIC, so warm
+    them all to v4 in ONE batched /ids call first; every resolve_folder_id below - and the
+    create/search/update calls on these folders later - then serves from cache. That is one
+    /ids call per process instead of one per folder, which keeps the consumer under Wrike's
+    rate limit (the table stays numeric; only the in-flight ids are v4)."""
+    ids = [fid for brands in folder_map.values() for fid in brands.values()]
+    client.resolve_folder_ids(ids)  # ONE batched /ids call, cached for the rest of the run
+    return {client.resolve_folder_id(fid) for fid in ids}
 
 
 def _assert_card_in_scope(task: dict, task_id: str, allowed: set[str]) -> None:

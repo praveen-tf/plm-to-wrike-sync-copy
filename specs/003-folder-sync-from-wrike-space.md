@@ -272,6 +272,14 @@ The consumer later reads the freshly-populated table via `load_folder_map` /
   by round-tripping all 89 folders back through `/ids`. `resolve_folder_id` converts the stored
   numeric back to v4 on use (and raises loudly if one is ever unresolvable), so this also
   restores 001's original convention (the POC seed was numeric; `resolve_folder_id` exists for it).
+- **Consumer rate-limit resilience (follow-on, beyond folder-sync scope):** a live batch
+  surfaced Wrike `429`s dead-lettering messages. Two fixes keep "numeric at rest, v4 in flight,
+  optimal": (1) `_managed_folder_ids` warms the whole map's numeric→v4 mapping with **one
+  batched `/ids` call** (`WrikeClient.resolve_folder_ids`), so the hot path makes 1 resolution
+  call per process instead of ~88 — verified live (86 ids → 1 call, then 0). (2) `_request`
+  honors Wrike's `Retry-After` on `429` and has a larger retry budget (`max_attempts` 5→8), and
+  `host.json` lock auto-renewal went 5→10 min, so a throttled message waits and succeeds instead
+  of bouncing to the dead-letter queue. (Could be split into its own spec; left as a §7 note.)
 - **Brand became a routing key (mid-execution design change):** live validation found
   `MB - MR BEAST` and `MB - MEAT BOARDS` — two real, distinct brands sharing prefix `MB`. The
   original prefix-only model skipped one (wrong). Per the client, **both must map**, so the key
@@ -287,7 +295,7 @@ The consumer later reads the freshly-populated table via `load_folder_map` /
   state (synthetic fixture rows) was cleared so a fresh Centric producer run is the source of
   truth (`wrike_folder_map` + `category_author_map` kept).
 - **Files touched:** `db/schema.sql`, `wrike_client.py`, `mapping.py`, `sync.py`,
-  `folder_sync.py` (new), `function_app.py`, `local.settings.json.example`,
+  `folder_sync.py` (new), `function_app.py`, `host.json`, `local.settings.json.example`,
   `project_docs/wrike_api.md` (verified-live corrections), `README.md`, plus
   `tests/conftest.py`, `tests/test_wrike_client.py`, `tests/test_folder_sync.py`,
-  `tests/test_mapping.py`.
+  `tests/test_mapping.py`, `tests/test_sync.py`.

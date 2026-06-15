@@ -19,7 +19,7 @@ class WrikeError(Exception):
 
 class WrikeClient:
     def __init__(self, token: str, host: str = "www.wrike.com", timeout: float = 30.0,
-                 max_attempts: int = 5):
+                 max_attempts: int = 8):
         self._base = f"https://{host}/api/v4"
         self._session = requests.Session()
         self._session.headers.update({"Authorization": f"bearer {token}"})
@@ -53,7 +53,15 @@ class WrikeClient:
             if resp.status_code == 429 or resp.status_code >= 500:
                 if attempt == self._max_attempts:
                     raise WrikeError(f"{method} {path} -> {resp.status_code}: {resp.text}")
-                time.sleep(min(delay, 60))
+                # On 429, honor Wrike's Retry-After header (it states exactly how long it is
+                # throttling) instead of guessing; otherwise capped exponential backoff.
+                # Waiting it out beats raising -> Service Bus redelivery -> dead-letter under
+                # a batch that bursts past Wrike's rate limit.
+                retry_after = resp.headers.get("Retry-After")
+                wait = (float(retry_after)
+                        if retry_after and retry_after.replace(".", "", 1).isdigit()
+                        else delay)
+                time.sleep(min(wait, 60))
                 delay *= 2
                 continue
             raise WrikeError(f"{method} {path} -> {resp.status_code}: {resp.text}")
@@ -75,6 +83,24 @@ class WrikeClient:
             raise WrikeError(f"could not resolve numeric folder id {folder_id}")
         self._folder_cache[folder_id] = ids[0]["id"]
         return self._folder_cache[folder_id]
+
+    def resolve_folder_ids(self, folder_ids) -> None:
+        """Warm the numeric->v4 cache for MANY folder ids in ONE /ids call.
+
+        Wrike's /ids resolves a whole list of numeric (ApiV2) ids to v4 at once, so calling
+        this before a batch lets every later resolve_folder_id serve from cache - avoiding a
+        burst of one-call-per-folder /ids requests that trips Wrike's rate limit. Non-numeric
+        ids (already v4) and already-cached ids are skipped, so it is cheap to call repeatedly."""
+        pending = sorted({str(f) for f in folder_ids
+                          if str(f).isdigit() and str(f) not in self._folder_cache})
+        if not pending:
+            return
+        data = self._request(
+            "GET", "/ids",
+            params={"ids": json.dumps([int(p) for p in pending]), "type": "ApiV2Folder"},
+        )
+        for entry in data.get("data", []):
+            self._folder_cache[str(entry["apiV2Id"])] = entry["id"]
 
     def find_tasks_by_custom_field(self, field_id: str, value: str,
                                    folder_id: str) -> list[dict]:

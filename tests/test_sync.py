@@ -34,6 +34,9 @@ class FakeWrike:
     def resolve_folder_id(self, folder_id):
         return folder_id  # test folder ids are already "v4" (no numeric permalink resolution)
 
+    def resolve_folder_ids(self, folder_ids):
+        return None  # test ids are already "v4"; nothing to batch-resolve (see WrikeClient)
+
     @staticmethod
     def _cf_list(cf):
         # Wrike stores/returns custom fields as [{"id", "value"}] with string values.

@@ -118,3 +118,52 @@ def test_to_body_omits_absent_fields():
 def test_to_body_stringifies_none_values():
     body = WrikeClient._to_body({"customFields": {"F1": None}})
     assert {"id": "F1", "value": ""} in body["customFields"]
+
+
+class _Resp:
+    def __init__(self, code, headers=None, body=None):
+        self.status_code, self.ok = code, code < 400
+        self.headers, self._body, self.text = headers or {}, body or {}, ""
+
+    def json(self):
+        return self._body
+
+
+def test_request_honors_retry_after_on_429(monkeypatch):
+    # A 429 with Retry-After waits exactly that long, then succeeds on retry - so a throttled
+    # message rides out the limit instead of failing into Service Bus redelivery.
+    client = WrikeClient("tok")
+    responses = iter([_Resp(429, headers={"Retry-After": "7"}),
+                      _Resp(200, body={"data": [{"id": "X"}]})])
+    slept = []
+    monkeypatch.setattr(client._session, "request", lambda *a, **k: next(responses))
+    monkeypatch.setattr("wrike_client.time.sleep", lambda s: slept.append(s))
+    assert client._request("GET", "/x") == {"data": [{"id": "X"}]}
+    assert slept == [7.0]  # waited the Retry-After value, not the default backoff
+
+
+def test_resolve_folder_ids_batches_numeric_in_one_call(monkeypatch):
+    client = WrikeClient("tok")
+    seen = {}
+
+    def fake_request(method, path, **kwargs):
+        seen["method"], seen["path"], seen["params"] = method, path, kwargs.get("params")
+        return {"data": [{"id": "V4A", "apiV2Id": "111"}, {"id": "V4B", "apiV2Id": "222"}]}
+
+    monkeypatch.setattr(client, "_request", fake_request)
+    client.resolve_folder_ids(["111", "222", "IEALREADYV4", "111"])  # dup + non-numeric
+    assert (seen["method"], seen["path"]) == ("GET", "/ids")
+    assert json.loads(seen["params"]["ids"]) == [111, 222]  # only numeric, deduped
+    assert seen["params"]["type"] == "ApiV2Folder"
+    # later lookups now serve from cache (no further /ids calls)
+    assert client.resolve_folder_id("111") == "V4A"
+    assert client.resolve_folder_id("222") == "V4B"
+
+
+def test_resolve_folder_ids_no_call_when_cached_or_nonnumeric(monkeypatch):
+    client = WrikeClient("tok")
+    client._folder_cache["111"] = "V4A"
+    called = []
+    monkeypatch.setattr(client, "_request", lambda *a, **k: called.append(1) or {"data": []})
+    client.resolve_folder_ids(["111", "IEV4"])  # 111 cached, IEV4 already v4
+    assert called == []  # nothing to resolve -> no /ids request
