@@ -114,9 +114,11 @@ client's data-quality review. The function is read-only against Wrike and run on
 
 The Wrike author of a card is the owner of the API token that created it. Tokens are mapped to
 product categories in the `category_author_map` table. Cards are placed in the folder identified
-by the `wrike_folder_map` table (prefix → folder id), and a family with an unmapped prefix is
-created in the staging folder (a special `'*'` row in `wrike_folder_map`) and the missed prefix
-is logged.
+by the `wrike_folder_map` table, routed **prefix-first with brand as a tiebreaker**: a prefix
+with one folder routes by prefix alone, while a prefix shared by several brands (e.g.
+`MB - MR BEAST` vs `MB - MEAT BOARDS`) is disambiguated by an exact brand match. A family with
+an unmapped prefix — or a multi-brand prefix whose brand matches none — is created in the
+staging folder (a special `'*'` row in `wrike_folder_map`) and the miss is logged.
 
 ## Data model
 
@@ -128,7 +130,7 @@ The schema is defined in `db/schema.sql`.
 | `category_author_map` | Product category to author token mapping |
 | `sync_watermark` | Incremental cursor and last-run statistics |
 | `wrike_task_map` | 1:1 live map (PLM record ↔ Wrike card); keys: `plm_internal_id` (PK) ↔ `wrike_task_id` (UNIQUE); columns `item_number`, `family_id`, `customer` for audit/recovery |
-| `wrike_folder_map` | Item prefix to folder routing table (app-owned, rebuilt from Wrike space on each producer run); keys: `prefix` (PK), columns `wrike_folder_id`, `full_folder_name`, `brand` (audit only), `space_id`, timestamps |
+| `wrike_folder_map` | Prefix+brand to folder routing table (app-owned, rebuilt from the Wrike space on each producer run); key: `(prefix, brand)` composite PK (`brand` is the routing tiebreaker when brands share a prefix, `''` for the `'*'` staging row); columns `wrike_folder_id`, `full_folder_name`, `space_id`, timestamps |
 | `wrike_unmapped_log` | Review log for unmapped, ambiguous, or hand-made cards; columns: `item_number`, `customer`, `wrike_task_id`, `prefix`, `reason` (e.g., `no_exact_match`, `multiple_exact_matches`, `non_identical_extra`, `unmapped_prefix`, `no_plm_match`), `details`, `created_at` |
 | `sync_dlq` | Records that failed after retries |
 

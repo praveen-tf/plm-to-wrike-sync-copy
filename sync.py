@@ -73,8 +73,10 @@ def _current_custom_fields(task: dict) -> dict:
 
 
 def _managed_folder_ids(client, folder_map: dict) -> set[str]:
-    """The wrike_folder_map folder ids (incl. the '*' staging row) as Wrike v4 ids."""
-    return {client.resolve_folder_id(fid) for fid in folder_map.values()}
+    """The wrike_folder_map folder ids (incl. the '*' staging row) as Wrike v4 ids.
+    folder_map is {prefix -> {brand -> folder id}}, so flatten the inner brand dicts."""
+    return {client.resolve_folder_id(fid)
+            for brands in folder_map.values() for fid in brands.values()}
 
 
 def _assert_card_in_scope(task: dict, task_id: str, allowed: set[str]) -> None:
@@ -116,7 +118,7 @@ def process_family(conn, make_client, item, folder_map, author_map, now, summary
     else:
         # Cold path: search the prefix's folder (or staging) by the item number, then
         # branch on what comes back. The search is folder-scoped, never account-wide.
-        folder_id, is_staging = resolve_folder(item["prefix"], folder_map)
+        folder_id, is_staging = resolve_folder(item["prefix"], item["brand"], folder_map)
         if folder_id is None:  # no mapped folder AND no '*' staging row -> retry later
             return "deferred"
         matches = client.find_tasks_by_custom_field(
@@ -319,25 +321,27 @@ def reconcile_folders(conn, make_client, ctx) -> dict:
         plm_customers_by_item.setdefault(plm_item_number, []).append(plm_customer)
 
     summary = {"cards": 0, "mapped": 0, "logged": 0}
-    # The folder map includes the '*' staging row, so staged cards are walked too.
-    for map_key, folder_id in ctx["folder_map"].items():
-        for task in client.list_folder_tasks(folder_id):
-            summary["cards"] += 1
-            card_fields = _current_custom_fields(task)
-            item_number = card_fields.get(ITEM_NUMBER_FIELD_ID) or ""
-            card_customer = card_fields.get(CUSTOMER_FIELD_ID)
-            # A blank "PLM - Item #" (e.g. a hand-made card) never matches a record.
-            if any(customer_matches(plm_customer, card_customer)
-                   for plm_customer in plm_customers_by_item.get(item_number, [])):
-                summary["mapped"] += 1
-            else:
-                log_unmapped(
-                    conn, item_number=item_number or None, customer=card_customer or None,
-                    wrike_task_id=task["id"],
-                    prefix=item_prefix(item_number) or None,  # the card's own prefix
-                    reason="no_plm_match",
-                    details=f"card title {task.get('title', '')!r} "
-                            f"in folder {map_key}={folder_id}",
-                )
-                summary["logged"] += 1
+    # folder_map is {prefix -> {brand -> folder id}} and includes the '*' staging row, so
+    # every managed folder (staged cards too) is walked.
+    for prefix, brands in ctx["folder_map"].items():
+        for folder_id in brands.values():
+            for task in client.list_folder_tasks(folder_id):
+                summary["cards"] += 1
+                card_fields = _current_custom_fields(task)
+                item_number = card_fields.get(ITEM_NUMBER_FIELD_ID) or ""
+                card_customer = card_fields.get(CUSTOMER_FIELD_ID)
+                # A blank "PLM - Item #" (e.g. a hand-made card) never matches a record.
+                if any(customer_matches(plm_customer, card_customer)
+                       for plm_customer in plm_customers_by_item.get(item_number, [])):
+                    summary["mapped"] += 1
+                else:
+                    log_unmapped(
+                        conn, item_number=item_number or None, customer=card_customer or None,
+                        wrike_task_id=task["id"],
+                        prefix=item_prefix(item_number) or None,  # the card's own prefix
+                        reason="no_plm_match",
+                        details=f"card title {task.get('title', '')!r} "
+                                f"in folder {prefix}={folder_id}",
+                    )
+                    summary["logged"] += 1
     return summary

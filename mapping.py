@@ -100,17 +100,25 @@ def customer_matches(item_customer, card_customer) -> bool:
     return _normalize(item_customer) == _normalize(card_customer)
 
 
-def resolve_folder(prefix: str, folder_map: dict) -> tuple[str | None, bool]:
-    """Return (wrike_folder_id, is_staging) for an item prefix.
+def resolve_folder(prefix: str, brand: str, folder_map: dict) -> tuple[str | None, bool]:
+    """Return (wrike_folder_id, is_staging) for an item's (prefix, brand).
 
-    An unmapped prefix routes to the staging folder (the '*' row of wrike_folder_map)
-    - the card still gets created and the miss is logged for human follow-up (a real
-    prefix row is added only after client/business approval). With no '*' row either,
-    (None, True) -> the caller defers the item to a later run.
+    Prefix-first, brand as the tiebreaker: a prefix with a single folder routes by prefix
+    alone (brand ignored); a prefix shared by several brands (e.g. MB - MR BEAST vs
+    MB - MEAT BOARDS) is disambiguated by an exact brand match. An unmapped prefix - or a
+    multi-folder prefix whose brand matches none of them - routes to the staging folder (the
+    '*' row), where the card is still created and the miss is logged for human follow-up.
+    With no '*' row either, (None, True) -> the caller defers the item to a later run.
     """
-    if prefix in folder_map:
-        return folder_map[prefix], False
-    return folder_map.get("*"), True
+    folders = folder_map.get(prefix)  # {brand -> folder id} for this prefix
+    if folders:
+        if len(folders) == 1:
+            return next(iter(folders.values())), False
+        match = folders.get(brand or "")
+        if match is not None:
+            return match, False
+    staging = folder_map.get("*")  # {'' -> staging folder id}
+    return (next(iter(staging.values())) if staging else None), True
 
 
 def resolve_author(product_category: str, author_map: dict):
@@ -122,17 +130,20 @@ def resolve_author(product_category: str, author_map: dict):
     return author_map.get(product_category) or author_map.get("*")
 
 
-def load_folder_map(conn) -> dict[str, str]:
-    """{prefix -> Wrike folder id} from the human-maintained wrike_folder_map table,
-    including the '*' staging-fallback row.
+def load_folder_map(conn) -> dict[str, dict[str, str]]:
+    """{prefix -> {brand -> Wrike folder id}} from the wrike_folder_map table, including the
+    '*' staging-fallback row (brand '').
 
-    The table is the SOLE authority for ALL folder ids - none live in app settings -
-    and the app never discovers folders by searching Wrike. Folder ids may be numeric
-    permalink ids; the Wrike client resolves those to v4 ids on use. An unmapped
-    prefix routes to the '*' staging folder (see resolve_folder)."""
+    The table is rebuilt from the Wrike space each run by the folder-sync stage (see
+    folder_sync.py). A prefix usually maps to one folder, but two brands can share a prefix,
+    so brand is the inner key and the routing tiebreaker (see resolve_folder). Folder ids may
+    be numeric permalink ids; the Wrike client resolves those to v4 ids on use."""
+    out: dict[str, dict[str, str]] = {}
     with conn.cursor() as cur:
-        cur.execute("SELECT prefix, wrike_folder_id FROM wrike_folder_map")
-        return {prefix: folder_id for prefix, folder_id in cur.fetchall()}
+        cur.execute("SELECT prefix, brand, wrike_folder_id FROM wrike_folder_map")
+        for prefix, brand, folder_id in cur.fetchall():
+            out.setdefault(prefix, {})[brand or ""] = folder_id
+    return out
 
 
 def load_category_author_map(conn) -> dict:

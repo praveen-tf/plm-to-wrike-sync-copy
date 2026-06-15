@@ -43,30 +43,50 @@ CREATE INDEX IF NOT EXISTS ix_plm_item_modified_at ON plm_item (modified_at);
 CREATE INDEX IF NOT EXISTS ix_plm_item_family_id   ON plm_item (family_id);
 
 -- ---------------------------------------------------------------------------
--- Config: item-prefix -> Wrike folder routing.
+-- Config: item-prefix + brand -> Wrike folder routing.
 -- Populated by the folder-sync stage (folder_sync.py), which runs at the start of
 -- every producer run: it pulls the top-level folders of WRIKE_SPACE_ID and rebuilds
 -- this table from them (TRUNCATE + repopulate), so it is always a faithful mirror of
--- the space. Each folder titled "<PREFIX> - <Brand>" becomes a row - prefix is the
--- routing key, brand is stored for audit (not a routing key).
--- The special row prefix = '*' is the staging/pending fallback (the "_PENDING_REVIEW"
--- folder, created in Wrike by folder sync if absent): an item whose prefix has no row
--- is created there and the miss is logged to wrike_unmapped_log for follow-up. With no
--- '*' row, the item defers.
+-- the space. Each folder titled "<PREFIX> - <Brand>" becomes a row.
+-- The key is (prefix, brand): a prefix usually has one folder, but two brands can share a
+-- prefix (e.g. "MB - MR BEAST" vs "MB - MEAT BOARDS"). Routing is prefix-first with brand
+-- as the tiebreaker - a single-folder prefix routes by prefix alone; a multi-folder prefix
+-- is disambiguated by an exact brand match (see mapping.resolve_folder).
+-- The special row prefix = '*' (brand '') is the staging/pending fallback (the
+-- "_PENDING_REVIEW" folder, created in Wrike by folder sync if absent): an item whose
+-- prefix has no row - or a multi-folder prefix with no brand match - is created there and
+-- the miss is logged to wrike_unmapped_log for follow-up. With no '*' row, the item defers.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS wrike_folder_map (
-    prefix            text PRIMARY KEY,           -- e.g. WP, LT; '*' = staging fallback
+    prefix            text NOT NULL,              -- e.g. WP, LT; '*' = staging fallback
     wrike_folder_id   text NOT NULL,              -- numeric permalink id or v4 API id
     full_folder_name  text,
-    brand             text,                       -- folder title right of " - " (audit only)
+    brand             text NOT NULL DEFAULT '',   -- folder title right of " - "; '' for '*'
     space_id          text,                       -- the Wrike space the folder lives in
     created_at        timestamptz NOT NULL DEFAULT now(),
-    updated_at        timestamptz NOT NULL DEFAULT now()
+    updated_at        timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (prefix, brand)
 );
 
--- For DBs created before the brand column existed (CREATE TABLE IF NOT EXISTS won't
--- add columns to an existing table) - idempotent backfill:
+-- Migration for DBs created before brand existed / when prefix alone was the key.
+-- Idempotent: add the column, default empty (never NULL), then swap the single-column
+-- (prefix) primary key for the composite (prefix, brand) one only while the old key stands.
 ALTER TABLE wrike_folder_map ADD COLUMN IF NOT EXISTS brand text;
+UPDATE wrike_folder_map SET brand = '' WHERE brand IS NULL;
+ALTER TABLE wrike_folder_map ALTER COLUMN brand SET DEFAULT '';
+ALTER TABLE wrike_folder_map ALTER COLUMN brand SET NOT NULL;
+DO $$
+DECLARE pk_cols int;
+BEGIN
+    SELECT count(*) INTO pk_cols
+    FROM pg_index i
+    JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY (i.indkey)
+    WHERE i.indrelid = 'wrike_folder_map'::regclass AND i.indisprimary;
+    IF pk_cols = 1 THEN  -- still the old single-column (prefix) key
+        ALTER TABLE wrike_folder_map DROP CONSTRAINT wrike_folder_map_pkey;
+        ALTER TABLE wrike_folder_map ADD PRIMARY KEY (prefix, brand);
+    END IF;
+END $$;
 
 -- POC seed: a couple of example rows. Folder sync OVERWRITES this table on the first
 -- real producer run (the stored space_id no longer matches WRIKE_SPACE_ID), so these
@@ -74,8 +94,8 @@ ALTER TABLE wrike_folder_map ADD COLUMN IF NOT EXISTS brand text;
 INSERT INTO wrike_folder_map (prefix, wrike_folder_id, full_folder_name, brand, space_id) VALUES
     ('WP', '4459532498', 'WP - Winnie-the-Pooh', 'Winnie-the-Pooh', '4450208096'),
     ('LT', '4469574468', 'LT - Lindt',           'Lindt',           '4450208096'),
-    ('*',  '4483642519', '_PENDING_REVIEW',      NULL,              '4450208096')
-ON CONFLICT (prefix) DO NOTHING;
+    ('*',  '4483642519', '_PENDING_REVIEW',      '',                '4450208096')
+ON CONFLICT (prefix, brand) DO NOTHING;
 
 -- ---------------------------------------------------------------------------
 -- Config: product-category -> author identity (Wrike Author = token owner).

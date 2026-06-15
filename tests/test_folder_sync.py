@@ -24,7 +24,7 @@ def _folder_rows(conn):
     """All wrike_folder_map rows (prefix, folder id, full name, brand, space), by prefix."""
     with conn.cursor() as cur:
         cur.execute("SELECT prefix, wrike_folder_id, full_folder_name, brand, space_id "
-                    "FROM wrike_folder_map ORDER BY prefix")
+                    "FROM wrike_folder_map ORDER BY prefix, brand")
         return cur.fetchall()
 
 
@@ -43,7 +43,7 @@ def test_parses_prefix_brand_and_skips_non_conforming(pg_conn):
                        "pending_review_created": False}
     assert client.create_calls == []  # _PENDING_REVIEW already existed in the space
     assert _folder_rows(pg_conn) == [
-        ("*",  "F_PR", "_PENDING_REVIEW",      None,              "ISPACE"),
+        ("*",  "F_PR", "_PENDING_REVIEW",      "",                "ISPACE"),
         ("LT", "F_LT", "LT - Lindt",           "Lindt",           "ISPACE"),
         ("WP", "F_WP", "WP - Winnie-the-Pooh", "Winnie-the-Pooh", "ISPACE"),
     ]
@@ -59,7 +59,7 @@ def test_creates_pending_review_when_absent(pg_conn):
     assert summary["pending_review_created"] is True
     assert client.create_calls == [("ISPACE", "_PENDING_REVIEW")]  # parent = space id
     star = next(r for r in _folder_rows(pg_conn) if r[0] == "*")
-    assert star == ("*", "F_PR_NEW", "_PENDING_REVIEW", None, "ISPACE")
+    assert star == ("*", "F_PR_NEW", "_PENDING_REVIEW", "", "ISPACE")
 
 
 def test_rebuild_drops_stale_rows(pg_conn):
@@ -72,9 +72,23 @@ def test_rebuild_drops_stale_rows(pg_conn):
     assert [r[0] for r in _folder_rows(pg_conn)] == ["*", "WP"]  # OLD wiped
 
 
-def test_skips_duplicate_prefix(pg_conn):
+def test_keeps_same_prefix_with_different_brands(pg_conn):
+    # Two brands can share a prefix (MB - MR BEAST vs MB - MEAT BOARDS): keep BOTH rows.
+    folders = [{"id": "F_MB1", "title": "MB - MR BEAST", "childIds": []},
+               {"id": "F_MB2", "title": "MB - MEAT BOARDS", "childIds": []},
+               {"id": "F_PR", "title": "_PENDING_REVIEW", "childIds": []}]
+
+    summary = sync_folders(pg_conn, client=FakeWrikeClient(folders), space_id="ISPACE")
+
+    assert (summary["inserted"], summary["skipped"]) == (2, 0)
+    mb = sorted((r[3], r[1]) for r in _folder_rows(pg_conn) if r[0] == "MB")
+    assert mb == [("MEAT BOARDS", "F_MB2"), ("MR BEAST", "F_MB1")]  # both stored, keyed by brand
+
+
+def test_skips_exact_duplicate_prefix_and_brand(pg_conn):
+    # Same prefix AND brand twice is a true duplicate folder -> keep the first only.
     folders = [{"id": "F_WP1", "title": "WP - Pooh", "childIds": []},
-               {"id": "F_WP2", "title": "WP - Winnie", "childIds": []},  # dup prefix
+               {"id": "F_WP2", "title": "WP - Pooh", "childIds": []},  # exact dup
                {"id": "F_PR", "title": "_PENDING_REVIEW", "childIds": []}]
 
     summary = sync_folders(pg_conn, client=FakeWrikeClient(folders), space_id="ISPACE")

@@ -20,8 +20,15 @@ configured Wrike **space id**, pulls that space's **top-level folders**, and reb
 `wrike_folder_map` from them — deriving each row's `prefix` and a new `brand` column from
 the folder title (`"<PREFIX> - <Brand>"`). It also guarantees a `_PENDING_REVIEW` staging
 folder exists (creating it in Wrike if missing). After this stage the table is current and
-the existing engine routes cards exactly as before: **by prefix only** — a prefix hit goes
-to that folder, a miss goes to `_PENDING_REVIEW`.
+the engine routes cards **prefix-first with brand as the tiebreaker**: a prefix with one
+folder routes by prefix alone; a prefix shared by several brands (e.g. `MB - MR BEAST` vs
+`MB - MEAT BOARDS`) is disambiguated by an exact brand match; an unmapped prefix — or a
+multi-brand prefix with no brand match — goes to `_PENDING_REVIEW`.
+
+> **Design evolved during execution (2026-06-15):** this started prefix-only with `brand`
+> as audit-only. Live validation found two real folders sharing prefix `MB` for different
+> brands, so brand became part of the routing key — the table key is now `(prefix, brand)`
+> and `resolve_folder`/`load_folder_map` take brand into account (see §7).
 
 ## 2. Requirements
 
@@ -37,12 +44,21 @@ to that folder, a miss goes to `_PENDING_REVIEW`.
   repopulating, so the map is always a faithful mirror of the current space — folders renamed
   or removed in Wrike never leave stale rows, and a changed `WRIKE_SPACE_ID` is handled for
   free (every row is simply replaced).
+- WHEN two top-level folders share a `prefix` but differ in `brand` (e.g. `MB - MR BEAST`
+  and `MB - MEAT BOARDS`), THEN keep **both** as distinct `(prefix, brand)` rows. Only a true
+  duplicate (same prefix **and** brand) is skipped+warned.
 - WHEN no top-level folder titled `_PENDING_REVIEW` exists in the space, THEN create it in
-  Wrike (`POST /folders/{rootFolderId}/folders`) during this stage. EITHER way, store the
-  `_PENDING_REVIEW` folder as the `'*'` staging row so the existing `resolve_folder`
-  fallback is untouched.
-- WHEN the stage finishes, THEN return a summary (folders found / upserted / skipped,
-  whether the table was wiped, whether `_PENDING_REVIEW` was created) for logging.
+  Wrike (`POST /folders/{spaceId}/folders`) during this stage. EITHER way, store the
+  `_PENDING_REVIEW` folder as the `'*'` staging row (brand `''`) so the `resolve_folder`
+  fallback works unchanged.
+- WHEN the stage finishes, THEN return a summary (folders found / inserted / skipped,
+  whether `_PENDING_REVIEW` was created) for logging.
+
+**Routing (`mapping.py`, `sync.py`)**
+- WHEN resolving a card's folder, THEN `resolve_folder(prefix, brand, folder_map)` is
+  **prefix-first with brand as a tiebreaker**: one folder for the prefix → route by prefix
+  (brand ignored); several → exact brand match; none / no match → the `'*'` staging folder.
+- WHEN loading the map, THEN `load_folder_map` returns `{prefix -> {brand -> folder_id}}`.
 
 **Wrike client (`wrike_client.py`)** *(mechanics verified live 2026-06-15 — see §4)*
 - WHEN listing a space's **top-level** folders, THEN `GET /spaces/{spaceId}/folders` (which
@@ -60,17 +76,18 @@ to that folder, a miss goes to `_PENDING_REVIEW`.
   the producer is unchanged.
 
 **Schema (`db/schema.sql`)**
-- WHEN the schema is applied, THEN `wrike_folder_map` has a nullable `brand text` column
-  (idempotent `ADD COLUMN IF NOT EXISTS`).
+- WHEN the schema is applied, THEN `wrike_folder_map` has a `brand text NOT NULL DEFAULT ''`
+  column and its primary key is the composite `(prefix, brand)` (idempotent migration: add
+  the column, then swap the single-column `prefix` key for the composite one).
 
 ### Out of Scope
 
-- Any change to `mapping.py` (`resolve_folder`, `load_folder_map`), `sync.py`,
-  `plm_reader.py`, `state.py`, `changes.py`, or the consumer/reconcile flow. Routing stays
-  **prefix-only**; `brand` is stored for audit/identification, **not** a routing key, so
-  `load_folder_map` (which returns `{prefix -> folder_id}`) is untouched.
-- Using `brand` as a second lookup before `_PENDING_REVIEW` (explicitly dropped — prefix
-  miss routes straight to staging).
+- Any change to `plm_reader.py`, `state.py`, `changes.py`, or the Service Bus
+  producer/consumer message flow. (`mapping.py`/`sync.py` *do* change — for brand-aware
+  routing — but only at the `resolve_folder`/`load_folder_map`/`_managed_folder_ids` seam.)
+- Fuzzy/normalized brand matching — the brand tiebreaker is a **raw exact** string match
+  (item brand from Centric `collection` vs the folder-title brand), same philosophy as
+  `customer_matches`.
 - Re-pulling folders mid-sync per unmapped card (no per-card Wrike re-trigger — the one
   upfront stage is authoritative for the run).
 - Deleting Wrike folders, renaming them, moving cards, or nested/subfolder routing (only
@@ -89,8 +106,8 @@ Centric refresh (002)  →  [NEW] folder sync  →  read eligible items  →  en
                               └─ ensure _PENDING_REVIEW folder (create if missing) → store as '*' row
 ```
 
-The consumer later reads the freshly-populated table via the unchanged
-`load_folder_map` / `resolve_folder` path.
+The consumer later reads the freshly-populated table via `load_folder_map` /
+`resolve_folder` (prefix-first, brand as tiebreaker).
 
 ### `wrike_folder_map` row, before → after
 
@@ -108,12 +125,14 @@ The consumer later reads the freshly-populated table via the unchanged
 | Layer | File | Change |
 |-------|------|--------|
 | Core logic | `folder_sync.py` | **New.** `sync_folders(conn, client, *, space_id) -> dict`: list top-level folders, wipe-on-space-change, parse `"<PREFIX> - <Brand>"`, upsert rows, ensure `_PENDING_REVIEW` (`'*'` row) |
-| Core logic | `wrike_client.py` | Add `list_top_level_folders(space_id)` (lists the space subtree, filters to the root's direct children) and `create_folder(parent_folder_id, title)` (top-level ⇒ parent is the `space_id`) |
+| Core logic | `wrike_client.py` | Add `list_top_level_folders(space_id)` (resolves a numeric space id → v4 root via `resolve_folder_id`, lists `/folders/{root}/folders`, filters to the root's direct children) and `create_folder(parent_folder_id, title)` (resolves parent; top-level ⇒ parent is the `space_id`) |
+| Core logic | `mapping.py` | `resolve_folder(prefix, brand, folder_map)` prefix-first/brand-tiebreak; `load_folder_map` returns `{prefix -> {brand -> folder_id}}` |
+| Core logic | `sync.py` | `process_family` passes `item["brand"]`; `_managed_folder_ids` + `reconcile_folders` flatten the nested map |
 | Entry point | `function_app.py` | `plm_wrike_producer`: call `sync_folders` after the Centric refresh, before `sorted_eligible_items`, with the catch-all author's Wrike client |
-| Data | `db/schema.sql` | `ALTER TABLE wrike_folder_map ADD COLUMN IF NOT EXISTS brand text`; note in comments that folder sync now owns/repopulates the table; refresh the POC seed to carry a `brand` value |
-| Config | `local.settings.json.example` | Add `WRIKE_SPACE_ID` |
-| Tests | `tests/test_folder_sync.py` (new), `tests/test_wrike_client.py` | See Tasks 5–6 |
-| Unchanged | `mapping.py`, `sync.py`, `plm_reader.py`, `state.py`, `changes.py`, `loader.py`, `centric_client.py` | Engine + routing from 001/002 untouched |
+| Data | `db/schema.sql` | `brand text NOT NULL DEFAULT ''` + composite PK `(prefix, brand)` (idempotent migration: add column, swap the single-column key for the composite); folder sync now owns/repopulates the table; POC seed refreshed |
+| Config | `local.settings.json.example` | `WRIKE_SPACE_ID` (already present — comment enriched) |
+| Tests | `tests/test_folder_sync.py` (new), `tests/test_wrike_client.py`, `tests/test_mapping.py` | See Tasks 2–6 |
+| Unchanged | `plm_reader.py`, `state.py`, `changes.py`, `loader.py`, `centric_client.py` | Engine from 001/002 untouched |
 
 ### Key Decisions
 
@@ -125,15 +144,17 @@ The consumer later reads the freshly-populated table via the unchanged
   matters, so the stage uses the `category_author_map` `'*'` row's token (the same default
   identity staging cards are already created under). **Requirement:** that token must be a
   member of `WRIKE_SPACE_ID` with folder-create permission (else `403`).
-- **Top-level only, via the root's `childIds`.** `GET /spaces/{spaceId}/folders` returns the
-  whole flattened subtree *including the root* (`id == spaceId`) — verified live (113 folders
-  vs 93 true top-level). So the client finds the root entry and keeps only folders in its
-  `childIds`. (The "not referenced as anyone's child" heuristic is wrong here — the root is in
-  the list and claims all top-level folders as children.)
-- **Routing stays prefix-only.** `brand` is parsed and stored but never read for routing, so
-  `mapping.py` is untouched and "downstream stays the same" holds literally. (Adding a column
-  the app only writes is intentional here — it is audit/identification data the client asked
-  for, not dead code.)
+- **Top-level only, via the root's `childIds`.** The numeric `WRIKE_SPACE_ID` resolves (via
+  the existing `resolve_folder_id`) to the v4 root folder; `GET /folders/{root}/folders` returns
+  the whole flattened subtree *including the root* (`id == root`). The client keeps only folders
+  in the root's `childIds`. (The "not referenced as anyone's child" heuristic is wrong here —
+  the root is in the list and claims all top-level folders as children.) Verified live: 88
+  top-level folders.
+- **Routing: prefix-first, brand as tiebreaker.** A prefix with one folder routes by prefix
+  alone (robust — no dependence on brand strings matching); a prefix shared by several brands
+  is disambiguated by an **exact** brand match (item brand from Centric `collection` vs the
+  folder-title brand). This is why `brand` is part of the key, not audit-only — forced by the
+  real `MB - MR BEAST` / `MB - MEAT BOARDS` collision found in live validation.
 - **`_PENDING_REVIEW` reuses the `'*'` convention.** Storing the staging folder under
   `prefix = '*'` means `resolve_folder` / `_managed_folder_ids` / reconcile keep working with
   zero changes; only the staging folder's *source* changes (discovered/created vs hand-seeded).
@@ -214,34 +235,46 @@ The consumer later reads the freshly-populated table via the unchanged
 
 ## 6. Acceptance Criteria
 
-- [x] All checklist tasks done; `python -m pytest` passes (**118 passed**), with **no test
+- [x] All checklist tasks done; `python -m pytest` passes (**122 passed**), with **no test
       reaching the live Wrike API** (HTTP mocked).
-- [x] `wrike_folder_map` has a nullable `brand` column; existing `seed_folder_map` inserts
-      (which omit `brand`) still work.
-- [x] `list_top_level_folders` filters the space subtree to the root's direct children (root
-      entry + deep descendants excluded), and `create_folder` posts the title with the space id
-      as parent; both parse the responses (`tests/test_wrike_client.py`).
+- [x] `wrike_folder_map` has a `brand text NOT NULL DEFAULT ''` column and a composite
+      `(prefix, brand)` primary key; existing `seed_folder_map` inserts (which omit `brand`,
+      defaulting to `''`) still work.
+- [x] `list_top_level_folders` resolves a numeric space id → v4 root and filters the subtree to
+      the root's direct children (root entry + deep descendants excluded), and `create_folder`
+      posts the title with the space id as parent; both parse the responses
+      (`tests/test_wrike_client.py`).
 - [x] `sync_folders` derives `prefix`/`brand` by splitting the title on `" - "`, skips
-      non-conforming titles with a warning, rebuilds the table each run (truncate +
-      repopulate), creates `_PENDING_REVIEW` only when absent and stores it as the `'*'` row,
-      and is idempotent (`tests/test_folder_sync.py`).
-- [x] The producer runs folder sync after the Centric refresh and before reading items; the
-      consumer/`resolve_folder` path is unchanged and routes prefix-only (prefix miss →
-      `_PENDING_REVIEW`).
-- [ ] **Live-sandbox validation (pending):** against the real `WRIKE_SPACE_ID`, folder sync
-      lists the top-level folders, populates prefix/brand rows, and creates `_PENDING_REVIEW` if
-      it was absent; a card with an unmapped prefix lands in `_PENDING_REVIEW`.
+      non-conforming titles with a warning, **keeps two brands that share a prefix** and skips
+      only true `(prefix, brand)` duplicates, rebuilds the table each run, creates
+      `_PENDING_REVIEW` only when absent (stored as the `'*'` row), and is idempotent
+      (`tests/test_folder_sync.py`).
+- [x] `resolve_folder` routes prefix-first with brand tiebreaker; the producer runs folder sync
+      after the Centric refresh and before reading items (`tests/test_mapping.py`).
+- [x] **Live-sandbox validation:** against the real `WRIKE_SPACE_ID` (numeric `4435490633` →
+      v4 root `MQAAAAEIYDdJ`), folder sync listed **88** top-level folders and wrote **88 rows**
+      (87 prefix/brand + the `'*'`/`_PENDING_REVIEW` staging row), **0 skipped**, creating no
+      Wrike folder (the staging folder already existed). Both `MB` brands stored
+      (`MR BEAST`/`MEAT BOARDS`); brand parsing confirmed (e.g. `AA → Auntie Anne's`).
 - [x] README + `local.settings.json.example` reflect the folder-sync stage and `WRIKE_SPACE_ID`.
 
 ## 7. Execution Notes (2026-06-15)
 
-- **Hardening beyond the literal checklist:** `sync_folders` also skips a **duplicate prefix**
-  (two top-level folders sharing a prefix) with a WARNING, keeping the first — a plain insert
-  would hit the `prefix` primary key and abort the whole producer run. Same skip+warn shape as
-  the no-`" - "` and `_PENDING_REVIEW` paths.
-- **Migration applied to the running DB:** the idempotent `ADD COLUMN IF NOT EXISTS brand` was
-  run against the dev/test `plm` Postgres so the suite is green; re-running `db/schema.sql`
-  elsewhere picks it up the same way.
-- **Files touched:** `db/schema.sql`, `wrike_client.py`, `folder_sync.py` (new),
-  `function_app.py`, `local.settings.json.example`, `project_docs/wrike_api.md` (verified-live
-  corrections), `README.md`, plus `tests/test_wrike_client.py`, `tests/test_folder_sync.py`.
+- **Numeric space id resolution (found in live validation):** `WRIKE_SPACE_ID` is a numeric
+  permalink id (`4435490633`); the Wrike API rejects numeric ids (400 "Invalid Space ID"). The
+  space id IS its root folder id, so `list_top_level_folders`/`create_folder` run it through the
+  existing `resolve_folder_id` (numeric → v4 via `/ids?type=ApiV2Folder`; `ApiV2Space` is not a
+  valid type) and use `GET /folders/{root}/folders`. Documented in `project_docs/wrike_api.md`.
+- **Brand became a routing key (mid-execution design change):** live validation found
+  `MB - MR BEAST` and `MB - MEAT BOARDS` — two real, distinct brands sharing prefix `MB`. The
+  original prefix-only model skipped one (wrong). Per the client, **both must map**, so the key
+  became `(prefix, brand)` and routing became prefix-first with brand as the exact-match
+  tiebreaker (`resolve_folder(prefix, brand, …)`, `load_folder_map` → `{prefix -> {brand ->
+  id}}`). `sync_folders` now keeps both and only skips a true `(prefix, brand)` duplicate.
+- **Migration applied to the running DB:** the idempotent `brand` column + the single-column →
+  composite `(prefix, brand)` primary-key swap were run against the dev/test `plm` Postgres so
+  the suite is green; re-running `db/schema.sql` elsewhere picks it up the same way.
+- **Files touched:** `db/schema.sql`, `wrike_client.py`, `mapping.py`, `sync.py`,
+  `folder_sync.py` (new), `function_app.py`, `local.settings.json.example`,
+  `project_docs/wrike_api.md` (verified-live corrections), `README.md`, plus
+  `tests/test_wrike_client.py`, `tests/test_folder_sync.py`, `tests/test_mapping.py`.

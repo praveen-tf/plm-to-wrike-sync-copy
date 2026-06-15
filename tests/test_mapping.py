@@ -88,23 +88,36 @@ def test_update_payload_custom_fields_are_update_eligible_only():
     assert cf[_fid("season")] == "2026 FALL/HOLIDAY"
 
 
-FOLDERS = {"WP": "fold_wp"}
+FOLDERS = {"WP": {"Winnie-the-Pooh": "fold_wp"}}   # {prefix -> {brand -> folder id}}
+STAGING = {"*": {"": "fold_staging"}}
 AUTHORS = {
     "CONFECTION": ("Jesse", "WRIKE_TOKEN_JESSE"),
     "*": ("Praveen", "WRIKE_TOKEN_PRAVEEN"),
 }
 
 
-def test_resolve_folder_known_prefix():
-    assert resolve_folder("WP", {**FOLDERS, "*": "fold_staging"}) == ("fold_wp", False)
+def test_resolve_folder_single_folder_prefix_ignores_brand():
+    # A prefix with one folder routes by prefix alone, regardless of the item's brand.
+    assert resolve_folder("WP", "anything at all", {**FOLDERS, **STAGING}) == ("fold_wp", False)
+
+
+def test_resolve_folder_brand_tiebreaks_a_shared_prefix():
+    shared = {"MB": {"MR BEAST": "fold_beast", "MEAT BOARDS": "fold_meat"}, **STAGING}
+    assert resolve_folder("MB", "MR BEAST", shared) == ("fold_beast", False)
+    assert resolve_folder("MB", "MEAT BOARDS", shared) == ("fold_meat", False)
+
+
+def test_resolve_folder_shared_prefix_no_brand_match_routes_to_staging():
+    shared = {"MB": {"MR BEAST": "fold_beast", "MEAT BOARDS": "fold_meat"}, **STAGING}
+    assert resolve_folder("MB", "SOMETHING ELSE", shared) == ("fold_staging", True)
 
 
 def test_resolve_folder_unknown_prefix_routes_to_staging_row():
-    assert resolve_folder("ZZ", {**FOLDERS, "*": "fold_staging"}) == ("fold_staging", True)
+    assert resolve_folder("ZZ", "x", {**FOLDERS, **STAGING}) == ("fold_staging", True)
 
 
 def test_resolve_folder_unknown_prefix_without_staging_row_is_none():
-    assert resolve_folder("ZZ", FOLDERS) == (None, True)
+    assert resolve_folder("ZZ", "x", FOLDERS) == (None, True)
 
 
 def test_resolve_author_maps_category_to_identity():
@@ -119,8 +132,21 @@ def test_resolve_author_falls_back_to_catch_all():
 
 
 def test_load_folder_map_reads_the_db_table(pg_conn):
-    seed_folder_map(pg_conn, {"WP": "4459532498", "LT": "fold_lt"})
-    assert load_folder_map(pg_conn) == {"WP": "4459532498", "LT": "fold_lt"}
+    seed_folder_map(pg_conn, {"WP": "4459532498", "LT": "fold_lt"})  # brand defaults to ''
+    assert load_folder_map(pg_conn) == {"WP": {"": "4459532498"}, "LT": {"": "fold_lt"}}
+
+
+def test_load_folder_map_nests_brands_sharing_a_prefix(pg_conn):
+    with pg_conn.cursor() as cur:
+        for brand, fid in (("MR BEAST", "fold_beast"), ("MEAT BOARDS", "fold_meat")):
+            cur.execute(
+                "INSERT INTO wrike_folder_map "
+                "(prefix, wrike_folder_id, full_folder_name, brand, space_id) "
+                "VALUES ('MB', %s, %s, %s, 'space-test')",
+                (fid, f"MB - {brand}", brand))
+    pg_conn.commit()
+    assert load_folder_map(pg_conn) == {
+        "MB": {"MR BEAST": "fold_beast", "MEAT BOARDS": "fold_meat"}}
 
 
 def test_load_folder_map_empty_table_is_empty_map(pg_conn):

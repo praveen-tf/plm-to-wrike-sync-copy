@@ -43,8 +43,10 @@ def test_list_folder_tasks_paginates_with_next_page_token(monkeypatch):
 
 
 def test_list_top_level_folders_filters_to_root_children(monkeypatch):
-    # GET /spaces/{id}/folders returns the WHOLE subtree incl. the root (id == space id)
-    # and deep descendants; only the root's direct children are top-level.
+    # The space id IS its root folder id; GET /folders/{root}/folders returns the WHOLE
+    # subtree incl. the root (id == root) and deep descendants. Only the root's direct
+    # children are top-level. (space_id "ISPACE" is non-numeric, so resolve_folder_id is a
+    # pass-through - no /ids call.)
     client = WrikeClient("tok")
     space_id = "ISPACE"
     subtree = [
@@ -61,7 +63,7 @@ def test_list_top_level_folders_filters_to_root_children(monkeypatch):
 
     monkeypatch.setattr(client, "_request", fake_request)
     out = client.list_top_level_folders(space_id)
-    assert (seen["method"], seen["path"]) == ("GET", f"/spaces/{space_id}/folders")
+    assert (seen["method"], seen["path"]) == ("GET", f"/folders/{space_id}/folders")
     assert [f["id"] for f in out] == ["F_WP", "F_LT"]  # root + deep descendant excluded
 
 
