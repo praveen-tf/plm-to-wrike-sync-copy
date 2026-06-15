@@ -67,6 +67,13 @@ def test_list_top_level_folders_filters_to_root_children(monkeypatch):
     assert [f["id"] for f in out] == ["F_WP", "F_LT"]  # root + deep descendant excluded
 
 
+def test_to_numeric_id_decodes_v4_to_permalink_id():
+    # v4 ids are URL-safe base64 of [type byte][big-endian numeric id]. Pairs verified live
+    # by round-tripping through the supported /ids endpoint (numeric -> v4).
+    assert WrikeClient.to_numeric_id("MQAAAAEIYDdJ") == "4435490633"   # the space root
+    assert WrikeClient.to_numeric_id("MQAAAAELdip0") == "4487260788"   # DS - DISNEY
+
+
 def test_create_folder_posts_title_as_query_param(monkeypatch):
     client = WrikeClient("tok")
     seen = {}

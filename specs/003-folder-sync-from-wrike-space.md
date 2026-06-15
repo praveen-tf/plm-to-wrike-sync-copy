@@ -36,8 +36,8 @@ multi-brand prefix with no brand match — goes to `_PENDING_REVIEW`.
 - WHEN the stage runs, THEN list the **top-level** folders of `WRIKE_SPACE_ID` and, for
   each whose title contains `" - "`, split on the first `" - "` into `prefix` (left) and
   `brand` (right) and upsert a `wrike_folder_map` row
-  `(prefix, wrike_folder_id, full_folder_name, brand, space_id)`. The Wrike folder `id`
-  (already a v4 id) is stored directly.
+  `(prefix, wrike_folder_id, full_folder_name, brand, space_id)`. The Wrike folder's v4 `id`
+  is stored as its **numeric permalink id** (`to_numeric_id`), consistent with `space_id`.
 - WHEN a top-level folder's title does **not** contain `" - "` (no derivable prefix),
   THEN skip it and log a WARNING (it cannot be keyed) — do not guess a prefix.
 - WHEN the stage runs, THEN **erase the whole table** (`TRUNCATE wrike_folder_map`) before
@@ -114,7 +114,7 @@ The consumer later reads the freshly-populated table via `load_folder_map` /
 | Column | Before (human-seeded) | After (folder-sync owned) |
 |---|---|---|
 | `prefix` | hand-entered, e.g. `WP` | title left of `" - "`, e.g. `WP` |
-| `wrike_folder_id` | numeric permalink or v4 | the folder's **v4 `id`** from the API |
+| `wrike_folder_id` | numeric permalink or v4 | the folder's **numeric permalink id**, decoded from the API's v4 `id` (`to_numeric_id`), consistent with `space_id` |
 | `full_folder_name` | hand-entered | the folder `title` verbatim |
 | **`brand`** *(new)* | — | title right of `" - "`, e.g. `Winnie-the-Pooh` |
 | `space_id` | hand-entered | `WRIKE_SPACE_ID` |
@@ -125,7 +125,7 @@ The consumer later reads the freshly-populated table via `load_folder_map` /
 | Layer | File | Change |
 |-------|------|--------|
 | Core logic | `folder_sync.py` | **New.** `sync_folders(conn, client, *, space_id) -> dict`: list top-level folders, wipe-on-space-change, parse `"<PREFIX> - <Brand>"`, upsert rows, ensure `_PENDING_REVIEW` (`'*'` row) |
-| Core logic | `wrike_client.py` | Add `list_top_level_folders(space_id)` (resolves a numeric space id → v4 root via `resolve_folder_id`, lists `/folders/{root}/folders`, filters to the root's direct children) and `create_folder(parent_folder_id, title)` (resolves parent; top-level ⇒ parent is the `space_id`) |
+| Core logic | `wrike_client.py` | Add `list_top_level_folders(space_id)` (resolves a numeric space id → v4 root via `resolve_folder_id`, lists `/folders/{root}/folders`, filters to the root's direct children), `create_folder(parent_folder_id, title)` (resolves parent; top-level ⇒ parent is the `space_id`), and `to_numeric_id(v4_id)` (decodes a v4 id → its numeric permalink id for storage) |
 | Core logic | `mapping.py` | `resolve_folder(prefix, brand, folder_map)` prefix-first/brand-tiebreak; `load_folder_map` returns `{prefix -> {brand -> folder_id}}` |
 | Core logic | `sync.py` | `process_family` passes `item["brand"]`; `_managed_folder_ids` + `reconcile_folders` flatten the nested map |
 | Entry point | `function_app.py` | `plm_wrike_producer`: call `sync_folders` after the Centric refresh, before `sorted_eligible_items`, with the catch-all author's Wrike client |
@@ -235,7 +235,7 @@ The consumer later reads the freshly-populated table via `load_folder_map` /
 
 ## 6. Acceptance Criteria
 
-- [x] All checklist tasks done; `python -m pytest` passes (**122 passed**), with **no test
+- [x] All checklist tasks done; `python -m pytest` passes (**123 passed**), with **no test
       reaching the live Wrike API** (HTTP mocked).
 - [x] `wrike_folder_map` has a `brand text NOT NULL DEFAULT ''` column and a composite
       `(prefix, brand)` primary key; existing `seed_folder_map` inserts (which omit `brand`,
@@ -255,7 +255,8 @@ The consumer later reads the freshly-populated table via `load_folder_map` /
       v4 root `MQAAAAEIYDdJ`), folder sync listed **88** top-level folders and wrote **88 rows**
       (87 prefix/brand + the `'*'`/`_PENDING_REVIEW` staging row), **0 skipped**, creating no
       Wrike folder (the staging folder already existed). Both `MB` brands stored
-      (`MR BEAST`/`MEAT BOARDS`); brand parsing confirmed (e.g. `AA → Auntie Anne's`).
+      (`MR BEAST`/`MEAT BOARDS`); brand parsing confirmed (e.g. `AA → Auntie Anne's`); folder ids
+      stored as **numeric permalink ids** (e.g. `DS → 4487260788`).
 - [x] README + `local.settings.json.example` reflect the folder-sync stage and `WRIKE_SPACE_ID`.
 
 ## 7. Execution Notes (2026-06-15)
@@ -265,16 +266,28 @@ The consumer later reads the freshly-populated table via `load_folder_map` /
   space id IS its root folder id, so `list_top_level_folders`/`create_folder` run it through the
   existing `resolve_folder_id` (numeric → v4 via `/ids?type=ApiV2Folder`; `ApiV2Space` is not a
   valid type) and use `GET /folders/{root}/folders`. Documented in `project_docs/wrike_api.md`.
+- **Folder ids stored numeric, not v4 (client request):** the table holds the numeric
+  permalink id (like `space_id`), decoded from the API's v4 id by `WrikeClient.to_numeric_id`
+  (URL-safe base64 → `[type byte][big-endian numeric]`; Wrike has no v4→numeric API). Verified
+  by round-tripping all 89 folders back through `/ids`. `resolve_folder_id` converts the stored
+  numeric back to v4 on use (and raises loudly if one is ever unresolvable), so this also
+  restores 001's original convention (the POC seed was numeric; `resolve_folder_id` exists for it).
 - **Brand became a routing key (mid-execution design change):** live validation found
   `MB - MR BEAST` and `MB - MEAT BOARDS` — two real, distinct brands sharing prefix `MB`. The
   original prefix-only model skipped one (wrong). Per the client, **both must map**, so the key
   became `(prefix, brand)` and routing became prefix-first with brand as the exact-match
   tiebreaker (`resolve_folder(prefix, brand, …)`, `load_folder_map` → `{prefix -> {brand ->
   id}}`). `sync_folders` now keeps both and only skips a true `(prefix, brand)` duplicate.
-- **Migration applied to the running DB:** the idempotent `brand` column + the single-column →
-  composite `(prefix, brand)` primary-key swap were run against the dev/test `plm` Postgres so
-  the suite is green; re-running `db/schema.sql` elsewhere picks it up the same way.
+- **Migration applied to the running DBs:** the idempotent `brand` column + the single-column →
+  composite `(prefix, brand)` primary-key swap were run against both `plm` and `plm_test`; the
+  suite is green and re-running `db/schema.sql` elsewhere picks it up the same way.
+- **Test isolation fixed (incident during execution):** the suite was running against the real
+  `plm` DB (conftest used the default `PG_DB`), so `pytest` `TRUNCATE`d live sync state. `conftest`
+  now defaults `PG_DB=plm_test` and **hard-fails** if it ever lands on `plm`. The polluted `plm`
+  state (synthetic fixture rows) was cleared so a fresh Centric producer run is the source of
+  truth (`wrike_folder_map` + `category_author_map` kept).
 - **Files touched:** `db/schema.sql`, `wrike_client.py`, `mapping.py`, `sync.py`,
   `folder_sync.py` (new), `function_app.py`, `local.settings.json.example`,
   `project_docs/wrike_api.md` (verified-live corrections), `README.md`, plus
-  `tests/test_wrike_client.py`, `tests/test_folder_sync.py`, `tests/test_mapping.py`.
+  `tests/conftest.py`, `tests/test_wrike_client.py`, `tests/test_folder_sync.py`,
+  `tests/test_mapping.py`.

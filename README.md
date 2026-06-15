@@ -241,7 +241,8 @@ deployment.
 1. Set up a local PostgreSQL instance with a `plm` database and `plm` role. The defaults
    are `localhost:5432`, `db plm`, `user plm`, `password plm_local_pw`. To override, set
    any of `PG_HOST`, `PG_PORT`, `PG_DB`, `PG_USER`, `PG_PASSWORD`, or use a single `PG_CONN`
-   connection string.
+   connection string. The test suite uses a **separate `plm_test` database** (owned by `plm`,
+   same schema) so it never touches live sync state — create it alongside `plm`.
 
 2. Apply the schema (idempotent, includes guarded migrations):
 
@@ -261,9 +262,10 @@ psql -h localhost -U plm -d plm -f seed_plm_item.sql
 python -m pytest
 ```
 
-Tests automatically skip database-backed cases if PostgreSQL is unreachable. Note that tests
-truncate the state tables during execution. Before running a live sync batch after tests,
-reload the seed data to reset the sync state.
+The suite defaults to the isolated `plm_test` database (via `PG_DB`) and **hard-fails if it is
+ever pointed at the production `plm` database**, because it `TRUNCATE`s the state tables — so it
+never disturbs live sync state. Database-backed cases skip automatically if PostgreSQL is
+unreachable.
 
 The application reads settings locally from `local.settings.json`, which is excluded from
 version control. Use `local.settings.json.example` as a template. To run the producer locally

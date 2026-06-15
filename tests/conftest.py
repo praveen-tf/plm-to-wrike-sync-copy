@@ -1,20 +1,28 @@
+import os
+
+# The suite TRUNCATEs the state tables, so it must NEVER touch the real `plm` database.
+# Default to the dedicated `plm_test` DB before anything opens a connection (db.connect
+# reads PG_* lazily); the pg_conn fixture also hard-fails if it ever lands on `plm`.
+os.environ.setdefault("PG_DB", "plm_test")
+
 import psycopg
 import pytest
 from psycopg.rows import dict_row
 
 from db import connect
 
+PRODUCTION_DB = "plm"
+
 
 @pytest.fixture
 def pg_conn():
     """A live Postgres connection with the state tables truncated for test isolation.
 
-    Skips (rather than fails) when the local Postgres isn't reachable, so the
-    pure-logic unit tests still run without a database.
+    Skips (rather than fails) when Postgres isn't reachable, so the pure-logic unit tests
+    still run without a database. Hard-fails if pointed at the production `plm` database:
+    the suite TRUNCATEs the state tables, so it must run against `plm_test`.
 
-    Note: wrike_folder_map is truncated too - tests own its contents (see
-    seed_folder_map). On the shared dev DB the real seed rows are restored by
-    re-running db/schema.sql (idempotent), same as reloading plm_item.
+    Note: wrike_folder_map is truncated too - tests own its contents (see seed_folder_map).
     """
     try:
         conn = connect()
@@ -22,6 +30,12 @@ def pg_conn():
         pytest.skip(f"Postgres not reachable (is it running, and are PG_* set?): {exc}")
     conn.autocommit = True
     with conn.cursor() as cur:
+        cur.execute("SELECT current_database()")
+        if cur.fetchone()[0] == PRODUCTION_DB:
+            conn.close()
+            pytest.fail(
+                f"refusing to run tests against the production database {PRODUCTION_DB!r}: "
+                f"the suite TRUNCATEs state tables. Point PG_DB/PG_CONN at 'plm_test'.")
         cur.execute(
             "TRUNCATE plm_item, wrike_task_map, sync_watermark, sync_dlq, "
             "wrike_folder_map, wrike_unmapped_log")

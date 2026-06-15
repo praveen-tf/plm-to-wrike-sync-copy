@@ -19,6 +19,9 @@ class FakeWrikeClient:
         self.create_calls.append((parent_folder_id, title))
         return self._created_folder
 
+    def to_numeric_id(self, v4_id):
+        return v4_id  # identity here; the real v4->numeric decode is tested in test_wrike_client
+
 
 def _folder_rows(conn):
     """All wrike_folder_map rows (prefix, folder id, full name, brand, space), by prefix."""

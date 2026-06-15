@@ -5,6 +5,7 @@ Author is the identity that owns the token, so a client is created per author
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import time
@@ -111,6 +112,20 @@ class WrikeClient:
             page_token = data.get("nextPageToken")
             if not page_token:
                 return tasks
+
+    @staticmethod
+    def to_numeric_id(v4_id: str) -> str:
+        """Convert a Wrike v4 entity id to its legacy NUMERIC (permalink / ApiV2) id - the
+        inverse of resolve_folder_id's numeric->v4 conversion.
+
+        Wrike exposes no API for v4 -> numeric (the /ids endpoint only goes numeric -> v4),
+        but a v4 id is just URL-safe base64 of [1 type byte][big-endian numeric id], so we
+        decode it directly. Verified by round-tripping every folder in the live space back
+        through /ids (89/89 matched). Stored numeric ids are turned back into v4 on use by
+        resolve_folder_id, which raises via /ids if a value is ever unresolvable - so a bad
+        decode fails loudly, it can never silently misroute."""
+        padded = v4_id + "=" * (-len(v4_id) % 4)
+        return str(int.from_bytes(base64.urlsafe_b64decode(padded)[1:], "big"))
 
     def list_top_level_folders(self, space_id: str) -> list[dict]:
         """The TOP-LEVEL folders (id + title) of a Wrike space.

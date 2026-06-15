@@ -52,7 +52,10 @@ def sync_folders(conn, client, *, space_id: str) -> dict:
                 skipped += 1
                 continue
             seen.add((prefix, brand))
-            cur.execute(_INSERT_ROW, (prefix, folder["id"], title, brand, space_id))
+            # Store the numeric (permalink) folder id, like space_id - the consumer's
+            # resolve_folder_id turns it back into a v4 id on use.
+            cur.execute(_INSERT_ROW,
+                        (prefix, client.to_numeric_id(folder["id"]), title, brand, space_id))
             inserted += 1
 
         # Guarantee the staging folder exists in Wrike, then store it as the '*' fallback
@@ -61,7 +64,8 @@ def sync_folders(conn, client, *, space_id: str) -> dict:
         created = pending is None
         if created:
             pending = client.create_folder(space_id, PENDING_REVIEW_TITLE)
-        cur.execute(_INSERT_ROW, ("*", pending["id"], PENDING_REVIEW_TITLE, "", space_id))
+        cur.execute(_INSERT_ROW,
+                    ("*", client.to_numeric_id(pending["id"]), PENDING_REVIEW_TITLE, "", space_id))
 
     conn.commit()
     summary = {"found": len(folders), "inserted": inserted, "skipped": skipped,
