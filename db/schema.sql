@@ -44,28 +44,37 @@ CREATE INDEX IF NOT EXISTS ix_plm_item_family_id   ON plm_item (family_id);
 
 -- ---------------------------------------------------------------------------
 -- Config: item-prefix -> Wrike folder routing.
--- ALL folder ids live here - no folder id is environment config. Human-maintained
--- and the SOLE authority: the app never discovers folders by searching Wrike. New
--- rows are added manually after client/business approval.
--- The special row prefix = '*' is the staging/pending fallback: an item whose
--- prefix has no row is created in that folder and the miss is logged to
--- wrike_unmapped_log for follow-up. With no '*' row either, the item defers.
+-- Populated by the folder-sync stage (folder_sync.py), which runs at the start of
+-- every producer run: it pulls the top-level folders of WRIKE_SPACE_ID and rebuilds
+-- this table from them (TRUNCATE + repopulate), so it is always a faithful mirror of
+-- the space. Each folder titled "<PREFIX> - <Brand>" becomes a row - prefix is the
+-- routing key, brand is stored for audit (not a routing key).
+-- The special row prefix = '*' is the staging/pending fallback (the "_PENDING_REVIEW"
+-- folder, created in Wrike by folder sync if absent): an item whose prefix has no row
+-- is created there and the miss is logged to wrike_unmapped_log for follow-up. With no
+-- '*' row, the item defers.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS wrike_folder_map (
     prefix            text PRIMARY KEY,           -- e.g. WP, LT; '*' = staging fallback
     wrike_folder_id   text NOT NULL,              -- numeric permalink id or v4 API id
     full_folder_name  text,
+    brand             text,                       -- folder title right of " - " (audit only)
     space_id          text,                       -- the Wrike space the folder lives in
     created_at        timestamptz NOT NULL DEFAULT now(),
     updated_at        timestamptz NOT NULL DEFAULT now()
 );
 
--- POC seed: the test folders in the Personal space. Folder ids are environment-
--- specific; humans update these rows when the sync points at the client's MGF space.
-INSERT INTO wrike_folder_map (prefix, wrike_folder_id, full_folder_name, space_id) VALUES
-    ('WP', '4459532498', 'WP - Winnie-the-Pooh', '4450208096'),
-    ('LT', '4469574468', 'LT - Lindt',           '4450208096'),
-    ('*',  '4483642519', 'Pending (staging)',    '4450208096')
+-- For DBs created before the brand column existed (CREATE TABLE IF NOT EXISTS won't
+-- add columns to an existing table) - idempotent backfill:
+ALTER TABLE wrike_folder_map ADD COLUMN IF NOT EXISTS brand text;
+
+-- POC seed: a couple of example rows. Folder sync OVERWRITES this table on the first
+-- real producer run (the stored space_id no longer matches WRIKE_SPACE_ID), so these
+-- are illustrative only and harmless to leave.
+INSERT INTO wrike_folder_map (prefix, wrike_folder_id, full_folder_name, brand, space_id) VALUES
+    ('WP', '4459532498', 'WP - Winnie-the-Pooh', 'Winnie-the-Pooh', '4450208096'),
+    ('LT', '4469574468', 'LT - Lindt',           'Lindt',           '4450208096'),
+    ('*',  '4483642519', '_PENDING_REVIEW',      NULL,              '4450208096')
 ON CONFLICT (prefix) DO NOTHING;
 
 -- ---------------------------------------------------------------------------

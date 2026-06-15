@@ -26,7 +26,7 @@ beyond confirming the current state of a card before an update.
 
 ```
 Centric 8 PLM API
-   -> Producer Function (timer)        refreshes plm_item mirror, reads change delta, enqueues messages
+   -> Producer Function (timer)        refreshes plm_item mirror, syncs folder map, reads change delta, enqueues messages
    -> PostgreSQL (plm_item mirror)     local cache of active Centric styles (read by producer/consumer/reconcile)
    -> Service Bus queue (plm-sync)     decouples and buffers, with a dead-letter queue
    -> Consumer Function (queue trigger) transforms and writes to Wrike, records sync state
@@ -55,15 +55,19 @@ Pacific). On each run it:
    (`mgf_ready_for_wrike=true`) modified since the watermark, maps each to a `plm_item` record
    (resolving references, joining lists, stripping HTML), and upserts them. On the first run,
    this is a full backfill of the ready set.
-3. Selects records where `modified_at` is later than the watermark and the eligibility flag
+3. Syncs the folder map from Wrike: reads the top-level folders of `WRIKE_SPACE_ID`, rebuilds
+   `wrike_folder_map` from them (parsing folder titles for `"<PREFIX> - <Brand>"` pairs), and
+   guarantees a `_PENDING_REVIEW` staging folder exists (creating it in Wrike if absent). This
+   stage runs once per producer run under the catch-all author's Wrike token.
+4. Selects records where `modified_at` is later than the watermark and the eligibility flag
    (`ready_for_wrike`) is set.
-4. Reduces each family to its canonical record.
-5. Sends one Service Bus message per family. The message carries identifiers only, not a data
+5. Reduces each family to its canonical record.
+6. Sends one Service Bus message per family. The message carries identifiers only, not a data
    snapshot, so the consumer always acts on the current database state.
-6. Advances the watermark once the messages are enqueued. Delivery and retry are then owned by
+7. Advances the watermark once the messages are enqueued. Delivery and retry are then owned by
    the queue.
 
-The producer does not call Wrike.
+The producer does not call Wrike except to sync the folder map (step 3).
 
 ### Consumer (Service Bus queue trigger)
 
@@ -124,7 +128,7 @@ The schema is defined in `db/schema.sql`.
 | `category_author_map` | Product category to author token mapping |
 | `sync_watermark` | Incremental cursor and last-run statistics |
 | `wrike_task_map` | 1:1 live map (PLM record ↔ Wrike card); keys: `plm_internal_id` (PK) ↔ `wrike_task_id` (UNIQUE); columns `item_number`, `family_id`, `customer` for audit/recovery |
-| `wrike_folder_map` | Item prefix to folder routing table (human-maintained, sole authority); keys: `prefix` (PK), columns `wrike_folder_id`, `full_folder_name`, `space_id`, timestamps |
+| `wrike_folder_map` | Item prefix to folder routing table (app-owned, rebuilt from Wrike space on each producer run); keys: `prefix` (PK), columns `wrike_folder_id`, `full_folder_name`, `brand` (audit only), `space_id`, timestamps |
 | `wrike_unmapped_log` | Review log for unmapped, ambiguous, or hand-made cards; columns: `item_number`, `customer`, `wrike_task_id`, `prefix`, `reason` (e.g., `no_exact_match`, `multiple_exact_matches`, `non_identical_extra`, `unmapped_prefix`, `no_plm_match`), `details`, `created_at` |
 | `sync_dlq` | Records that failed after retries |
 
@@ -146,14 +150,21 @@ configuration itself.
 | `CENTRIC_API_VERSION` | Centric API version, default `v2` | Plain value |
 | `WRIKE_TOKEN_<NAME>` | Wrike API token per author identity | Key Vault reference |
 | `WRIKE_HOST` | Wrike API host, default `www.wrike.com` | Plain value |
+| `WRIKE_SPACE_ID` | Wrike space id for folder sync; the app discovers and maps the space's top-level folders on each producer run | Plain value |
 | `WRIKE_RETAIL_ITEM_TYPE_ID` | Custom Item Type id for new cards | Plain value |
 | `APPLICATIONINSIGHTS_CONNECTION_STRING` | Telemetry | Plain value |
 
 The `WRIKE_TOKEN_<NAME>` setting names must match the `token_ref` values in
-`category_author_map`. Folder routing is read from the `wrike_folder_map` table; the app
-never searches Wrike for folders by name. A special `'*'` row in `wrike_folder_map` serves as
-a fallback staging folder for unmapped prefixes. If no `'*'` row is present, items with
-unmapped prefixes defer (safe degradation).
+`category_author_map`. Folder routing is derived from the `wrike_folder_map` table
+(which is rebuilt each producer run from the configured Wrike space). Folder titles
+must follow the `"<PREFIX> - <Brand>"` pattern to be mapped (titles without `" - "`
+are skipped). A special `'*'` row in `wrike_folder_map` serves as a fallback staging
+folder for unmapped prefixes (the `_PENDING_REVIEW` folder, automatically created/synced
+from Wrike). If no `'*'` row is present, items with unmapped prefixes defer (safe degradation).
+
+The catch-all author token (`WRIKE_TOKEN_PRAVEEN` by default) must be a member of `WRIKE_SPACE_ID`
+with folder-create permission, as folder sync uses this identity to list folders and create
+`_PENDING_REVIEW` if it is absent.
 
 For details on Centric authentication and the field mapping from Centric to `plm_item`, see
 `project_docs/centric_8_api.md` and `specs/002-centric-8-api-source.md`.
@@ -188,14 +199,15 @@ For details on Centric authentication and the field mapping from Centric to `plm
    Center. After deployment, three functions appear under Functions: `plm_wrike_producer`
    (timer), `plm_wrike_consumer` (queue trigger), and `plm_wrike_reconcile` (HTTP).
 
-9. Folder mapping. Populate the `wrike_folder_map` table with the item prefixes and their
-   target folder ids (e.g., WP → 4459532498, LT → 4469574468). New prefixes are added by
-   humans after client/business approval, not by the app.
+9. Verify. On the Function App, confirm the host is running and all three functions are listed.
+   On Configuration, confirm every Key Vault reference shows a resolved status. Test the
+   producer and consumer by running the producer manually (via Code and Test or admin endpoint)
+   and checking the queue depth and logs. The folder map is automatically synced from Wrike
+   on the first producer run.
 
-10. Verify. On the Function App, confirm the host is running and all three functions are listed.
-    On Configuration, confirm every Key Vault reference shows a resolved status. Test the
-    producer and consumer by running the producer manually (via Code and Test or admin endpoint)
-    and checking the queue depth and logs.
+10. Monitor. Use Application Insights for execution logs and failures. Use the Service Bus
+    metrics for active and dead-lettered message counts. The folder-sync stage logs a summary
+    of discovered folders on each producer run.
 
 ## Operations
 
@@ -253,4 +265,5 @@ reload the seed data to reset the sync state.
 
 The application reads settings locally from `local.settings.json`, which is excluded from
 version control. Use `local.settings.json.example` as a template. To run the producer locally
-(e.g., to test a Centric refresh), populate the Centric settings in `local.settings.json`.
+(e.g., to test a Centric refresh or folder sync), populate the Centric and Wrike settings in
+`local.settings.json`.

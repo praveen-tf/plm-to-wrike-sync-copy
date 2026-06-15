@@ -112,6 +112,34 @@ class WrikeClient:
             if not page_token:
                 return tasks
 
+    def list_top_level_folders(self, space_id: str) -> list[dict]:
+        """The TOP-LEVEL folders (id + title) of a Wrike space.
+
+        GET /spaces/{id}/folders returns the whole flattened subtree - including the
+        space's root folder (whose id == space_id) and every nested descendant (verified
+        live; see project_docs/wrike_api.md). The space id IS its root folder id, so the
+        top-level folders are exactly the root entry's childIds; filter the subtree to
+        those (the "not anyone's child" heuristic fails here - the root is in the list and
+        claims all top-level folders as its children)."""
+        data = self._request("GET", f"/spaces/{space_id}/folders").get("data", [])
+        by_id = {f["id"]: f for f in data}
+        root = by_id.get(space_id)
+        if root is None:
+            raise WrikeError(
+                f"space {space_id}: its root folder (id == space id) was not in the "
+                f"/spaces/{space_id}/folders response")
+        child_ids = set(root.get("childIds") or [])
+        return [f for f in data if f["id"] in child_ids]
+
+    def create_folder(self, parent_folder_id: str, title: str) -> dict:
+        """Create a folder under parent_folder_id and return it (carries its v4 id). Pass
+        a space id as the parent to create at the space's top level - the space id is its
+        root folder id. title goes as a QUERY param, not a JSON body (Wrike folder-create
+        quirk; see project_docs/wrike_api.md)."""
+        data = self._request(
+            "POST", f"/folders/{parent_folder_id}/folders", params={"title": title})
+        return data["data"][0]
+
     def create_task(self, folder_id: str, payload: dict) -> dict:
         folder = self.resolve_folder_id(folder_id)
         data = self._request("POST", f"/folders/{folder}/tasks", json=self._to_body(payload))

@@ -14,6 +14,7 @@
     "WRIKE_TOKEN_JESSE": "<Wrike permanent access token - CONFECTION author>",
     "WRIKE_HOST": "www.wrike.com",
     "WRIKE_RETAIL_ITEM_TYPE_ID": "<Custom Item Type id for 'Retail Item' (GET /custom_item_types)>",
+    "WRIKE_SPACE_ID": "<Wrike space id - folder sync rebuilds wrike_folder_map from its top-level folders each run; the catch-all author (WRIKE_TOKEN_PRAVEEN) must be a member of this space with folder-create permission>",
 
     "CENTRIC_BASE_URL": "<e.g. https://company-sandbox.centricsoftware.com>",
     "CENTRIC_USERNAME": "<Centric API username>",

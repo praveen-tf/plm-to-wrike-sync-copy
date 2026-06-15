@@ -42,6 +42,44 @@ def test_list_folder_tasks_paginates_with_next_page_token(monkeypatch):
     assert calls[1]["nextPageToken"] == "tok2"
 
 
+def test_list_top_level_folders_filters_to_root_children(monkeypatch):
+    # GET /spaces/{id}/folders returns the WHOLE subtree incl. the root (id == space id)
+    # and deep descendants; only the root's direct children are top-level.
+    client = WrikeClient("tok")
+    space_id = "ISPACE"
+    subtree = [
+        {"id": space_id, "title": "MGF Space", "childIds": ["F_WP", "F_LT"]},  # root
+        {"id": "F_WP", "title": "WP - Winnie-the-Pooh", "childIds": ["F_NESTED"]},
+        {"id": "F_LT", "title": "LT - Lindt", "childIds": []},
+        {"id": "F_NESTED", "title": "WP - nested", "childIds": []},  # descendant, excluded
+    ]
+    seen = {}
+
+    def fake_request(method, path, **kwargs):
+        seen["method"], seen["path"] = method, path
+        return {"data": subtree}
+
+    monkeypatch.setattr(client, "_request", fake_request)
+    out = client.list_top_level_folders(space_id)
+    assert (seen["method"], seen["path"]) == ("GET", f"/spaces/{space_id}/folders")
+    assert [f["id"] for f in out] == ["F_WP", "F_LT"]  # root + deep descendant excluded
+
+
+def test_create_folder_posts_title_as_query_param(monkeypatch):
+    client = WrikeClient("tok")
+    seen = {}
+
+    def fake_request(method, path, **kwargs):
+        seen["method"], seen["path"], seen["params"] = method, path, kwargs.get("params")
+        return {"data": [{"id": "F_NEW", "title": "_PENDING_REVIEW"}]}
+
+    monkeypatch.setattr(client, "_request", fake_request)
+    out = client.create_folder("ISPACE", "_PENDING_REVIEW")  # space id == top-level parent
+    assert (seen["method"], seen["path"]) == ("POST", "/folders/ISPACE/folders")
+    assert seen["params"] == {"title": "_PENDING_REVIEW"}  # query param, not JSON body
+    assert out["id"] == "F_NEW"
+
+
 def test_to_body_forwards_custom_item_type_id():
     body = WrikeClient._to_body({"title": "T", "customItemTypeId": "ITYPE_RETAIL"})
     assert body["customItemTypeId"] == "ITYPE_RETAIL"

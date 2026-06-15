@@ -29,7 +29,9 @@ from azure.servicebus import ServiceBusClient, ServiceBusMessage
 
 from centric_client import make_centric_client
 from db import connect
+from folder_sync import sync_folders
 from loader import refresh_plm_items
+from mapping import load_category_author_map
 from plm_reader import read_one_item, sorted_eligible_items
 from settings import load_local_settings
 from state import EPOCH, get_watermark, set_watermark
@@ -67,6 +69,19 @@ def plm_wrike_producer(timer: func.TimerRequest) -> None:
         # reading it; the first run (watermark == EPOCH) backfills the full ready set.
         refreshed = refresh_plm_items(conn, make_centric_client(), since=watermark, now=now)
         logging.info("PLM->Wrike producer: refreshed %d Centric style(s) into plm_item", refreshed)
+
+        # Rebuild wrike_folder_map from the configured Wrike space so the consumer routes
+        # cards against current folders. Runs under the catch-all author identity, which
+        # must be a member of WRIKE_SPACE_ID with folder-create permission.
+        catch_all = load_category_author_map(conn).get("*")
+        if catch_all is None:
+            raise RuntimeError("category_author_map has no '*' catch-all row: no Wrike "
+                               "identity to run the folder sync with")
+        folder_client = make_wrike_client(catch_all[1])  # (author, token_ref)
+        folder_summary = sync_folders(conn, folder_client,
+                                      space_id=os.environ["WRIKE_SPACE_ID"])
+        logging.info("PLM->Wrike producer: folder sync %s", folder_summary)
+
         items = sorted_eligible_items(conn, watermark)
         if not items:
             logging.info("PLM->Wrike producer: nothing changed since %s", watermark)
