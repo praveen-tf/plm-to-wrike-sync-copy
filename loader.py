@@ -1,15 +1,18 @@
-"""Load `plm_item` records into Postgres from the Centric 8 PLM API.
+"""Load `plm_item` records into Postgres from the Postgres PLM source database.
 
-`style_to_plm_item` maps one Centric style to a plm_item record; `refresh_plm_items` pulls
-the ready-for-Wrike delta from Centric and upserts it via `load_plm_items`.
+`style_to_plm_item` maps one pre-resolved source row (from plm_source.read_ready_styles)
+to a plm_item record; `refresh_plm_items` reads the ready-for-Wrike delta from the source
+Postgres and upserts it via `load_plm_items`.
 """
 from __future__ import annotations
 
 import html
+import json
 import re
 from datetime import datetime, timezone
 
 from description import build_description
+from plm_source import read_ready_styles
 from state import EPOCH
 
 PLM_ITEM_COLUMNS = [
@@ -45,8 +48,7 @@ def item_prefix(item_number: str) -> str:
 
 
 def strip_html(text: str | None) -> str:
-    """Plain text from a Centric HTML field: drop tags, unescape entities, trim blank
-    lines (e.g. mgf_test_material -> contents)."""
+    """Plain text from an HTML field: drop tags, unescape entities, trim blank lines."""
     if not text:
         return ""
     text = re.sub(r"</(p|div)>|<br\s*/?>", "\n", text, flags=re.I)
@@ -79,37 +81,32 @@ def _parse_centric_timestamp(value) -> datetime | None:
     raise ValueError(f"unrecognized Centric _modified_at timestamp: {value!r}")
 
 
-def _format_centric_timestamp(dt: datetime) -> str:
-    """A datetime as Centric's `modified_after` query string: ISO 8601 UTC with a 'Z'
-    suffix, e.g. 2026-06-12T10:23:36Z. Verified on the sandbox - this is the ONLY accepted
-    form; no-Z, space-separated, slash-dated, and date-only variants all return 400.
-    Truncates to whole seconds (floor), so the delta never rounds past a changed item.
+def style_to_plm_item(row: dict, *, now: datetime) -> dict:
+    """Map one pre-resolved source row (from plm_source.read_ready_styles) to a plm_item
+    record. Reference fields (customer, product_category, brand, season) arrive already
+    resolved via SQL JOINs. mgf_print_method is a JSON array text that is parsed and joined.
     """
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def style_to_plm_item(style: dict, resolve, *, now: datetime) -> dict:
-    """Map one Centric style (raw API dict) to a plm_item record - see specs/002 §3.
-
-    `resolve(endpoint, ref_id)` turns a reference id into its display name
-    (CentricClient.resolve_ref); `now` is the modified_at fallback when a style carries no
-    `_modified_at`. created_at reuses modified_at - the API exposes no creation date.
-    """
-    item_number = style.get("mgf_item_identifier") or ""
+    item_number = row.get("item_number") or ""
     parts = item_number.split("-")
-    material_codes = style.get("mgf_material_code_item") or ""
-    contents = strip_html(style.get("mgf_test_material"))
-    item_name = style.get("node_name") or ""
-    modified_at = _parse_centric_timestamp(style.get("_modified_at")) or now
+    material_codes = row.get("material_codes") or ""
+    contents = strip_html(row.get("contents"))
+    item_name = row.get("item_name") or ""
+    modified_at = _parse_centric_timestamp(row.get("_modified_at")) or now
+
+    print_method_raw = row.get("mgf_print_method") or ""
+    try:
+        print_method = ", ".join(json.loads(print_method_raw)) if print_method_raw else ""
+    except (json.JSONDecodeError, TypeError):
+        print_method = str(print_method_raw)
 
     return {
-        "plm_internal_id": style["id"],
+        "plm_internal_id": row["id"],
         "item_number": item_number,
         "family_id": item_number[:8],
         "prefix": item_prefix(item_number),
         "code": parts[1] if len(parts) > 1 else "",
         "item_name": item_name,
-        "customer": resolve("category2s", style.get("category_2")),          # *CORE / *CUSTOM
+        "customer": row.get("customer") or "",
         "title": f"{item_number[:8]} {item_name}".strip(),
         "folder": None,
         "workflow": None,
@@ -118,37 +115,32 @@ def style_to_plm_item(style: dict, resolve, *, now: datetime) -> dict:
         "priority": None,
         "end_date": None,
         "description": build_description(material_codes, contents),
-        "print_method": ", ".join(style.get("mgf_print_method") or []),
-        "previous_item_no": style.get("mgf_previous_item_number") or "",
+        "print_method": print_method,
+        "previous_item_no": row.get("previous_item_number") or "",
         "contents": contents,
         "material_codes": material_codes,
-        "brand_category": style.get("mgf_brand_category_2") or "",
-        "product_category": resolve("category1s", style.get("category_1")),  # drives author map
-        "brand": resolve("collections", style.get("collection")),
-        "season": resolve("seasons", style.get("parent_season")),
-        "design_request": style.get("mgf_item_description") or "",
+        "brand_category": row.get("brand_category") or "",
+        "product_category": row.get("product_category") or "",
+        "brand": row.get("brand") or "",
+        "season": row.get("season") or "",
+        "design_request": row.get("design_request") or "",
         "design_brief": "",
-        "image_link": style.get("mgf_image_link") or "",
-        "ready_for_wrike": bool(style.get("mgf_ready_for_wrike")),
+        "image_link": row.get("mgf_image_link") or "",
+        "ready_for_wrike": row.get("mgf_ready_for_wrike") == "true",
         "created_at": modified_at,
         "modified_at": modified_at,
     }
 
 
-def refresh_plm_items(conn, client, *, since: datetime, now: datetime) -> int:
-    """Pull ready-for-Wrike styles changed since `since` from Centric, map them, and
-    upsert into plm_item (the local mirror). Returns the number of rows upserted.
+def refresh_plm_items(conn, source_conn, *, since: datetime, now: datetime) -> int:
+    """Read ready-for-Wrike styles changed since `since` from the source Postgres, map
+    them, and upsert into plm_item (the local mirror). Returns the number of rows upserted.
 
-    Fetches only mgf_ready_for_wrike=true (the sync targets) - the fast path; `active` is
-    re-checked client-side. `since` at/<= EPOCH (the first run) pulls the full ready set;
-    later runs pull only the modified_after delta. The mirror is therefore ready-only;
-    reconciliation reads it and may over-report not-ready cards as unmapped (accepted -
-    see specs/002).
+    At EPOCH (first run) the full ready set is fetched; on later runs only the delta
+    since `since`. See specs/004 for the source seam design.
     """
-    modified_after = None if since <= EPOCH else _format_centric_timestamp(since)
-    styles = client.list_styles(modified_after=modified_after, mgf_ready_for_wrike="true")
-    items = [style_to_plm_item(s, client.resolve_ref, now=now)
-             for s in styles if s.get("active")]
+    rows = read_ready_styles(source_conn, since)
+    items = [style_to_plm_item(row, now=now) for row in rows]
     if items:
         load_plm_items(conn, items)
     return len(items)

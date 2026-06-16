@@ -1,11 +1,11 @@
 """Builders + constants for the mapping/reconciliation tests.
 
-plm_row() builds a plm_item record by running a Centric-shaped style through
-loader.style_to_plm_item (with an identity resolver), so the field map / family-prefix-
-code derivation lives only in the loader. load_sample_items() loads the 11-item test
-topology (replaces the retired Excel/CSV source fixtures). wrike_card() builds a
-pre-existing Wrike card in the shape test_sync.FakeWrike stores them. The constants name
-the test folder topology shared across test_sync.py.
+plm_row() builds a plm_item record by running a pre-resolved source row through
+loader.style_to_plm_item, so the field map / family-prefix-code derivation lives only in
+the loader. load_sample_items() loads the 11-item test topology (replaces the retired
+Excel/CSV source fixtures). wrike_card() builds a pre-existing Wrike card in the shape
+test_sync.FakeWrike stores them. The constants name the test folder topology shared across
+test_sync.py.
 """
 from __future__ import annotations
 
@@ -32,36 +32,33 @@ LT_ITEMS = ["LT-68102-006-319", "LT-68103-006-319", "LT-68104-006-319",
             "LT-68105-006-319", "LT-68106-006-319"]
 
 
-def _identity_resolve(endpoint, ref_id):
-    """Test resolver: the style passes display values straight through as the ref id."""
-    return ref_id or ""
-
-
 def plm_row(plm_internal_id, item_number, *, customer=CORE, ready=True,
             created_at=T0, modified_at=T0, **extra) -> dict:
-    """One plm_item record built through the Centric mapper (loader.style_to_plm_item),
+    """One plm_item record built through the source mapper (loader.style_to_plm_item),
     so the field map / family-prefix-code derivation lives only in the loader."""
     family_id = item_number[:8]
-    style = {
+    row = {
         "id": plm_internal_id,
-        "active": True,
-        "mgf_item_identifier": item_number,
-        "node_name": f"{family_id} TEST ITEM",
-        "category_2": customer,                  # -> customer (identity resolve)
-        "category_1": "BAKING",                  # -> product_category (drives author map)
-        "collection": "TEST",                    # -> brand
-        "parent_season": "2026 FALL/HOLIDAY",    # -> season
-        "mgf_print_method": ["MATTE"],
-        "mgf_test_material": "CONTENTS",
-        "mgf_material_code_item": "MAT",
-        "mgf_brand_category_2": "THOUGHTFULLY GOURMET",
-        "mgf_ready_for_wrike": ready,
-        "_modified_at": None,                    # mapper falls back to created_at
+        "item_number": item_number,
+        "item_name": f"{family_id} TEST ITEM",
+        "mgf_print_method": '["MATTE"]',
+        "previous_item_number": "",
+        "contents": "CONTENTS",                      # no HTML; strip_html returns as-is
+        "material_codes": "MAT",
+        "brand_category": "THOUGHTFULLY GOURMET",
+        "customer": customer,                        # pre-resolved (identity)
+        "product_category": "BAKING",               # pre-resolved; drives author map
+        "brand": "TEST",                             # pre-resolved
+        "season": "2026 FALL/HOLIDAY",              # pre-resolved
+        "design_request": "",
+        "mgf_image_link": "",
+        "mgf_ready_for_wrike": "true" if ready else "false",
+        "_modified_at": None,                        # mapper falls back to created_at
     }
-    row = style_to_plm_item(style, _identity_resolve, now=created_at)
-    row["modified_at"] = modified_at
-    row.update(extra)
-    return row
+    item = style_to_plm_item(row, now=created_at)
+    item["modified_at"] = modified_at
+    item.update(extra)
+    return item
 
 
 def load_sample_items(conn, *, now=T0) -> None:

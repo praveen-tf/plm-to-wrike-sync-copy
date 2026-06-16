@@ -25,9 +25,9 @@ beyond confirming the current state of a card before an update.
 ## Architecture
 
 ```
-Centric 8 PLM API
+Postgres PLM source DB (centric_8_plm)
    -> Producer Function (timer)        refreshes plm_item mirror, syncs folder map, reads change delta, enqueues messages
-   -> PostgreSQL (plm_item mirror)     local cache of active Centric styles (read by producer/consumer/reconcile)
+   -> PostgreSQL (plm_item mirror)     local cache of ready Centric styles (read by producer/consumer/reconcile)
    -> Service Bus queue (plm-sync)     decouples and buffers, with a dead-letter queue
    -> Consumer Function (queue trigger) transforms and writes to Wrike, records sync state
    -> Wrike API                        creates or updates the card
@@ -40,7 +40,8 @@ Centric 8 PLM API
 | Function App (Python) | Hosts three functions: producer (timer), consumer (queue trigger), reconciliation (HTTP) |
 | Service Bus namespace and queue | Decoupling, retry, and dead-lettering between producer and consumer |
 | PostgreSQL | Centric mirror (`plm_item`), sync state, live map, folder routing, and unmapped-card log |
-| Key Vault | Wrike tokens, Centric credentials, database connection string, Service Bus connection string |
+| Postgres PLM source (`centric_8_plm`) | Upstream database (populated by Airbyte from Centric 8) that the producer refreshes the mirror from |
+| Key Vault | Wrike tokens, PLM source DB credentials, database connection string, Service Bus connection string |
 | Application Insights | Execution logs, failures, and queue metrics |
 
 ## How it works
@@ -51,10 +52,11 @@ Runs on a schedule (`0 0 12,0 * * *`, which is 12:00 and 00:00 UTC, or 05:00 and
 Pacific). On each run it:
 
 1. Reads the watermark (last run timestamp).
-2. Refreshes the `plm_item` mirror from Centric: fetches the ready-for-Wrike styles
-   (`mgf_ready_for_wrike=true`) modified since the watermark, maps each to a `plm_item` record
-   (resolving references, joining lists, stripping HTML), and upserts them. On the first run,
-   this is a full backfill of the ready set.
+2. Refreshes the `plm_item` mirror from the Postgres PLM source (`centric_8_plm` schema): a
+   single JOIN query returns the ready-for-Wrike styles (`mgf_ready_for_wrike=true`) modified
+   since the watermark with their reference fields (customer, product category, brand, season)
+   already resolved; the producer maps each to a `plm_item` record (joining lists, stripping
+   HTML) and upserts them. On the first run, this is a full backfill of the ready set.
 3. Syncs the folder map from Wrike: reads the top-level folders of `WRIKE_SPACE_ID`, rebuilds
    `wrike_folder_map` from them (parsing folder titles for `"<PREFIX> - <Brand>"` pairs), and
    guarantees a `_PENDING_REVIEW` staging folder exists (creating it in Wrike if absent). This
@@ -126,7 +128,7 @@ The schema is defined in `db/schema.sql`.
 
 | Table | Purpose |
 |---|---|
-| `plm_item` | Local mirror of active Centric styles (refreshed from Centric API on each producer run) |
+| `plm_item` | Local mirror of ready Centric styles (refreshed from the Postgres PLM source on each producer run) |
 | `category_author_map` | Product category to author token mapping |
 | `sync_watermark` | Incremental cursor and last-run statistics |
 | `wrike_task_map` | 1:1 live map (PLM record ↔ Wrike card); keys: `plm_internal_id` (PK) ↔ `wrike_task_id` (UNIQUE); columns `item_number`, `family_id`, `customer` for audit/recovery |
@@ -142,14 +144,11 @@ configuration itself.
 
 | Setting | Purpose | Source |
 |---|---|---|
-| `PG_CONN` | PostgreSQL connection string | Key Vault reference |
+| `PG_CONN` | App/state PostgreSQL connection string | Key Vault reference |
+| `PLM_SOURCE_PG_CONN` | Source PLM PostgreSQL connection string (`centric_8_plm` schema); or component vars `PLM_SOURCE_PG_HOST/PORT/DB/USER/PASSWORD` | Key Vault reference |
 | `ServiceBusConnection` | Queue listener connection (consumer) | Key Vault reference |
 | `ServiceBusSendConnection` | Queue sender connection (producer) | Key Vault reference |
 | `ServiceBusQueue` | Queue name, default `plm-sync` | Plain value |
-| `CENTRIC_BASE_URL` | Centric 8 API base URL (e.g., `https://company-sandbox.centricsoftware.com`) | Plain value |
-| `CENTRIC_USERNAME` | Centric API user account | Key Vault reference |
-| `CENTRIC_PASSWORD` | Centric API user password | Key Vault reference |
-| `CENTRIC_API_VERSION` | Centric API version, default `v2` | Plain value |
 | `WRIKE_TOKEN_<NAME>` | Wrike API token per author identity | Key Vault reference |
 | `WRIKE_HOST` | Wrike API host, default `www.wrike.com` | Plain value |
 | `WRIKE_SPACE_ID` | Wrike space id for folder sync; the app discovers and maps the space's top-level folders on each producer run | Plain value |
@@ -168,8 +167,8 @@ The catch-all author token (`WRIKE_TOKEN_PRAVEEN` by default) must be a member o
 with folder-create permission, as folder sync uses this identity to list folders and create
 `_PENDING_REVIEW` if it is absent.
 
-For details on Centric authentication and the field mapping from Centric to `plm_item`, see
-`project_docs/centric_8_api.md` and `specs/002-centric-8-api-source.md`.
+For the source schema, the JOIN query, and the field mapping from `centric_8_plm` to
+`plm_item`, see `project_docs/centric_8_plm_source.md` and `specs/004-postgres-plm-source.md`.
 
 ## Deployment using the Azure portal
 
@@ -182,8 +181,8 @@ For details on Centric authentication and the field mapping from Centric to `plm
    `plm-sync` and set maximum delivery count to 10, enable dead-lettering on message
    expiration, and enable duplicate detection. The dead-letter queue is created automatically.
 
-4. Key Vault. Create a Key Vault. Add the Centric credentials, Wrike tokens, the PostgreSQL
-   connection string, and the Service Bus connection string as secrets.
+4. Key Vault. Create a Key Vault. Add the PLM source DB connection string, Wrike tokens, the
+   app PostgreSQL connection string, and the Service Bus connection string as secrets.
 
 5. Function App. Create a Function App with the Python runtime. Open Identity and enable the
    system-assigned managed identity. In the Key Vault access policies, grant that identity Get
@@ -269,5 +268,5 @@ unreachable.
 
 The application reads settings locally from `local.settings.json`, which is excluded from
 version control. Use `local.settings.json.example` as a template. To run the producer locally
-(e.g., to test a Centric refresh or folder sync), populate the Centric and Wrike settings in
-`local.settings.json`.
+(e.g., to test a source refresh or folder sync), populate the `PLM_SOURCE_PG_CONN` and Wrike
+settings in `local.settings.json`.

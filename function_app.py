@@ -2,10 +2,10 @@
 
 Two functions share one codebase (see README.md):
 
-* plm_wrike_producer  - timer. Refreshes the local plm_item mirror from the Centric 8 API
-  (the delta since the watermark; the first run backfills the full ready set), then reads the
-  changed/eligible canonical items (one per item number) and pushes one message per item onto
-  the `plm-sync` queue, then advances the enqueue watermark.
+* plm_wrike_producer  - timer. Refreshes the local plm_item mirror from the Postgres PLM
+  source database (the delta since the watermark; the first run backfills the full ready set),
+  then reads the changed/eligible canonical items (one per item number) and pushes one message
+  per item onto the `plm-sync` queue, then advances the enqueue watermark.
   NCRONTAB `0 0 12,0 * * *` = 12:00 and 00:00 UTC = 05:00 / 17:00 Pacific. The schedule
   only fires once deployed to Azure (run_on_startup=False).
 
@@ -13,9 +13,9 @@ Two functions share one codebase (see README.md):
   item by item_number and creates/updates its Wrike card. An unhandled exception abandons the
   lock so Service Bus retries, then dead-letters after maxDeliveryCount.
 
-Secrets (Wrike tokens, Centric credentials, database and Service Bus connection strings)
-come from Key Vault references in the Function App settings. The test suite runs against a
-local Postgres (see db.py for connection defaults and README.md for setup).
+Secrets (Wrike tokens, PLM source DB credentials, app database and Service Bus connection
+strings) come from Key Vault references in the Function App settings. The test suite runs
+against a local Postgres (see db.py for connection defaults and README.md for setup).
 """
 from __future__ import annotations
 
@@ -27,8 +27,8 @@ from datetime import datetime, timezone
 import azure.functions as func
 from azure.servicebus import ServiceBusClient, ServiceBusMessage
 
-from centric_client import make_centric_client
 from db import connect
+from plm_source import connect_source
 from folder_sync import sync_folders
 from loader import refresh_plm_items
 from mapping import load_category_author_map
@@ -65,10 +65,11 @@ def plm_wrike_producer(timer: func.TimerRequest) -> None:
     now = datetime.now(timezone.utc)
     with connect() as conn:
         watermark = get_watermark(conn) or EPOCH
-        # Refresh the plm_item mirror from Centric (the delta since the watermark) before
-        # reading it; the first run (watermark == EPOCH) backfills the full ready set.
-        refreshed = refresh_plm_items(conn, make_centric_client(), since=watermark, now=now)
-        logging.info("PLM->Wrike producer: refreshed %d Centric style(s) into plm_item", refreshed)
+        # Refresh the plm_item mirror from the source Postgres (the delta since the watermark)
+        # before reading it; the first run (watermark == EPOCH) backfills the full ready set.
+        with connect_source() as src:
+            refreshed = refresh_plm_items(conn, src, since=watermark, now=now)
+        logging.info("PLM->Wrike producer: refreshed %d PLM style(s) into plm_item", refreshed)
 
         # Rebuild wrike_folder_map from the configured Wrike space so the consumer routes
         # cards against current folders. Runs under the catch-all author identity, which
